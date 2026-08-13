@@ -1,0 +1,23 @@
+{
+  "seed": 42,
+  "n_models": 20,
+  "bins": 6,
+  "methods": [
+    "usefulness",
+    "mdi",
+    "permutation",
+    "shap",
+    "lime",
+    "integrated_gradients"
+  ],
+  "datasets": [
+    "adult_income"
+  ],
+  "experiments": [
+    "synthetic",
+    "scores",
+    "comparison",
+    "profiling",
+    "binning"
+  ]
+}

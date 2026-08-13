@@ -1,0 +1,7 @@
+,top-1,top-3,top-5,top-7
+usefulness,1.0,3.0,5.0,7.0
+mdi,1.0,2.95,4.45,5.8
+permutation,1.0,2.0,4.25,5.95
+shap,1.0,2.05,4.45,5.85
+lime,1.0,1.95,3.9,5.4
+integrated_gradients,1.0,1.05,3.4,6.0

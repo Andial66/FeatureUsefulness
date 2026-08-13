@@ -1,0 +1,52 @@
+Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "mdi", "permutation", "shap", "lime", "integrated_gradients"], "datasets": ["adult_income"], "experiments": ["synthetic", "scores", "comparison", "profiling", "binning"]}
+run_tree_tests: all assertions passed
+
+[synthetic] controlled-feature study (known ground truth) ...
+    clean recovery: accuracy=1.000, Spearman(emp,true)=1.000, noise AUC=1.000
+    redundancy: x0+x0_copy=0.25 (true x0=0.25)
+
+======================================================================
+Dataset: adult_income
+======================================================================
+[main] usefulness scores ...
+    top feature by median score, per bin count:
+      3 bins: capital-gain         (mean acc 0.833)
+      4 bins: capital-gain         (mean acc 0.836)
+      5 bins: capital-gain         (mean acc 0.838)
+      6 bins: capital-gain         (mean acc 0.837)
+[A] comparison of importance methods ...
+    ground-truth agreement (Spearman ρ, mean [95% CI]):
+      usefulness             0.878 [0.878, 0.878]
+      mdi                    0.878 [0.878, 0.878]
+      permutation            0.879 [0.878, 0.880]
+      shap                   0.878 [0.878, 0.878]
+      lime                   0.878 [0.878, 0.878]
+      integrated_gradients   0.839 [0.790, 0.878]
+    paired Wilcoxon usefulness vs SHAP: p = 1 (n=20)  rankings identical across models -> no detectable difference
+[B] runtime & memory profiling ...
+    per-method runtime (s):
+method
+usefulness              1.0236
+mdi                     0.0000
+permutation             0.2164
+shap                    0.0477
+lime                    0.5924
+integrated_gradients    8.3498
+    scorer speedup (deepcopy -> copy-free): 3.3x
+[C] binning-strategy sensitivity ...
+    accuracy / ground-truth ρ by strategy and bins:
+strategy  bins  accuracy  spearman_gt
+ uniform     3     0.833        0.683
+ uniform     4     0.836        0.683
+ uniform     5     0.838        0.878
+ uniform     6     0.837        0.878
+quantile     3     0.809        0.293
+quantile     4     0.812        0.293
+quantile     5     0.812        0.293
+quantile     6     0.808        0.293
+  kmeans     3     0.835        0.878
+  kmeans     4     0.835        0.683
+  kmeans     5     0.835        0.878
+  kmeans     6     0.837        0.878
+
+Done. Tables and figures written to 'results/'.

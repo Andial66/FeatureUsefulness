@@ -1,0 +1,13 @@
+dataset,bins,strategy_a,strategy_b,spearman,top3_overlap
+california,3,uniform,quantile,0.7619047619047621,1
+california,3,uniform,kmeans,0.9047619047619048,3
+california,3,quantile,kmeans,0.7142857142857144,1
+california,4,uniform,quantile,0.9285714285714287,3
+california,4,uniform,kmeans,0.880952380952381,3
+california,4,quantile,kmeans,0.9047619047619048,3
+california,5,uniform,quantile,0.9523809523809524,3
+california,5,uniform,kmeans,0.9523809523809524,2
+california,5,quantile,kmeans,0.880952380952381,2
+california,6,uniform,quantile,0.7142857142857144,3
+california,6,uniform,kmeans,0.8571428571428572,3
+california,6,quantile,kmeans,0.9047619047619048,3
