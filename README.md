@@ -1,4 +1,4 @@
-# Extended experiments for *Feature Relevancy, Necessity and Usefulness*
+# Extended experiments for *Efficient Algorithms for Detecting Relevant, Necessary and Useful Features*
 
 This repository contains the whole experimentation for the paper "Efficient 
 Algorithms for Detecting Relevant, Necessary and Useful Features" by T.
