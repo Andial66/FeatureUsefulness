@@ -1,0 +1,24 @@
+# Dependencies for the extended experiments (extensions/usefulness_ext.py).
+# Versions below are the ones the code was developed and tested against; the
+# code does not rely on anything exotic, so nearby versions should also work.
+#
+# Core (already used by the original notebook):
+numpy>=1.24
+pandas>=1.5
+scikit-learn>=1.3
+scipy>=1.10
+matplotlib>=3.6
+seaborn>=0.12
+shap>=0.44
+
+# New, for the importance-method comparison (task A):
+#   * permutation importance  -> scikit-learn (already above)
+#   * Integrated Gradients     -> uses sklearn's MLPClassifier surrogate (no torch needed)
+#   * LIME:
+lime>=0.2.0.1
+
+# Optional: if you prefer a "real" Integrated Gradients on a torch model instead
+# of the numpy MLP-surrogate implementation, install these and swap the backend
+# in importance_integrated_gradients():
+# torch>=2.0
+# captum>=0.7

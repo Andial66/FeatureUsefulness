@@ -1,0 +1,2 @@
+dataset,n_nodes,deepcopy_s,clone_s,speedup
+adult_income,1799,3.251938807999977,0.9780915459996322,3.324779588679933
