@@ -3,9 +3,8 @@
 experiments_driver.py
 ===========================
 
-Reproducible command-line driver for the three extended experiments requested by
-the reviewers of "Efficient Algorithms for Detecting Relevant, Necessary and
-Useful Features".  It orchestrates :mod:`experiments` and writes every table
+Reproducible command-line driver for the paper's experiments.
+It orchestrates :mod:`experiments` and writes every table
 (as CSV) and figure (as PNG) under ``--out``.
 
 Examples
@@ -38,7 +37,6 @@ import warnings
 
 import pandas as pd
 
-# Make the module importable whether run from the repo root or from extensions/.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import experiments as ux
 

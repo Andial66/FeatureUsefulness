@@ -59,7 +59,7 @@ class Config:
     bins_grid: Tuple[int, ...] = (3, 4, 5, 6)
     strategies: Tuple[str, ...] = ("uniform", "quantile", "kmeans")
     test_size: float = 0.20
-    # per-dataset leaf regularisation, matching the paper (100*bins / 150*bins).
+    # per-dataset leaf regularization, matching the paper (100*bins / 150*bins).
     leaves_per_bin: Dict[str, int] = field(
         default_factory=lambda: {"california": 100, "bike_sharing": 100, "adult_income": 150}
     )
@@ -251,7 +251,7 @@ def _dec_tree_to_my_tree_rec(node: int, dec_tree, features: Sequence[str]) -> No
         feature_name = features[dec_tree.tree_.feature[node]]
         left = _dec_tree_to_my_tree_rec(dec_tree.tree_.children_left[node], dec_tree, features)
         right = _dec_tree_to_my_tree_rec(dec_tree.tree_.children_right[node], dec_tree, features)
-        threshold = dec_tree.tree_.threshold[node]              # FIX-1: use dec_tree, not global clf
+        threshold = dec_tree.tree_.threshold[node]
         return Node(feature_name, threshold, left, right)
     # leaf: majority class -> True/False sentinel leaf
     value = dec_tree.tree_.value[node]
@@ -277,7 +277,7 @@ def _usefulness_count(tree: Tree, feature: str, domains: Dict[str, Tuple[float, 
     # Conjunction over all values v of: (tree | feature = v).  An entity survives
     # iff the tree says True for *every* value of `feature` -> feature useless (True side).
     tree_all_true = clone(tree)
-    tree_all_true.condition(feature, lo)                        # FIX-3: start at true domain min
+    tree_all_true.condition(feature, lo)
     for val in range(lo + 1, hi + 1):
         nxt = clone(tree)
         nxt.condition(feature, val)
@@ -288,7 +288,7 @@ def _usefulness_count(tree: Tree, feature: str, domains: Dict[str, Tuple[float, 
     # Same, but for the negation: entities that are always False over `feature`.
     tree_all_false = clone(tree)
     tree_all_false.negate()
-    tree_all_false.condition(feature, lo)                       # FIX-3
+    tree_all_false.condition(feature, lo)
     for val in range(lo + 1, hi + 1):
         nxt = clone(tree)
         nxt.condition(feature, val)
@@ -299,7 +299,7 @@ def _usefulness_count(tree: Tree, feature: str, domains: Dict[str, Tuple[float, 
 
     # Total size of the (categorical) entity space.
     total = 1
-    for f in domains:                                          # FIX-2: iterate domains, not global
+    for f in domains:
         a, b = domains[f]
         total *= (math.floor(b) - math.ceil(a) + 1)
 
@@ -314,8 +314,7 @@ def compute_score(tree: Tree, feature: str, domains: Dict[str, Tuple[float, floa
     equals ``|entity space| - #{e : prediction is constant over feature}``.
 
     Uses the fast copy-free scorer (``Tree.clone``); the result is identical to
-    the ``copy.deepcopy`` prototype but ~5x faster (that overhead was purely an
-    implementation artifact, not the algorithm — see ``profile_scorer_speedup``).
+    the ``copy.deepcopy`` prototype but from 3 to 5 times faster.
     """
     return _usefulness_count(tree, feature, domains, Tree.clone)
 
@@ -399,7 +398,7 @@ def load_adult_income(url: str = "https://archive.ics.uci.edu/ml/machine-learnin
             df = df[df[col] != "?"]
     df = df.dropna().reset_index(drop=True)
 
-    # Encode *all* columns as ordinal integers (as the notebook does).
+    # Encode all columns as ordinal integers
     encoder = OrdinalEncoder()
     df[df.columns] = encoder.fit_transform(df[df.columns])
     _CACHE["adult"] = df
@@ -499,8 +498,8 @@ def train_tree(dataset: str, bins: int, strategy: str = "uniform", seed: int = 4
         domains["holiday"] = (0, 1)
         domains["workingday"] = (0, 1)
         if correct_categorical_domains:
-            domains["season"] = (1, 4)          # FIX: real values are 1..4, not (0, 1)
-            domains["weathersit"] = (1, 4)      # FIX: real values are 1..4, not (0, 4)
+            domains["season"] = (1, 4)
+            domains["weathersit"] = (1, 4)
         else:
             domains["season"] = (0, 1)          # original (buggy) values
             domains["weathersit"] = (0, 4)
@@ -561,7 +560,7 @@ def importance_shap(bundle: ModelBundle, sample: int = 200, seed: int = 42) -> n
 
     Multi-class contributions are summed (as in the paper's appendix).
     """
-    import shap  # lazy, guarded by the caller
+    import shap
     X = bundle.X_train
     Xs = X.sample(min(sample, len(X)), random_state=seed)
     explainer = shap.TreeExplainer(bundle.clf)
@@ -581,7 +580,7 @@ def importance_lime(bundle: ModelBundle, sample: int = 100, seed: int = 42) -> n
     All features are treated as categorical (they are ordinal bins), so LIME's
     continuous discretiser is switched off.
     """
-    from lime.lime_tabular import LimeTabularExplainer  # lazy, guarded by caller
+    from lime.lime_tabular import LimeTabularExplainer
     X = bundle.X_train.to_numpy(dtype=float)
     d = X.shape[1]
     explainer = LimeTabularExplainer(
@@ -592,7 +591,7 @@ def importance_lime(bundle: ModelBundle, sample: int = 100, seed: int = 42) -> n
     idx = rng.choice(len(X), size=min(sample, len(X)), replace=False)
 
     agg = np.zeros(d)
-    label = int(bundle.clf.classes_[-1])              # explain the positive class
+    label = int(bundle.clf.classes_[-1])
     for i in idx:
         exp = explainer.explain_instance(X[i], bundle.clf.predict_proba,
                                          num_features=d, labels=(label,))
@@ -703,19 +702,13 @@ def normalize_importance(v: np.ndarray, how: str = "sum") -> np.ndarray:
 # 4.  Comparing rankings: correlations, top-k overlap, ground-truth agreement
 # ---------------------------------------------------------------------------
 #
-# Because the methods live on wildly different scales, we compare the *rankings*
+# Because the methods live on different scales, we compare the *rankings*
 # they induce, not the raw numbers.  Three complementary views:
 #   * rank correlation (Spearman / Kendall) between every pair of methods;
 #   * top-k overlap of each method with the usefulness score -- this is exactly
 #     the metric of Table 1 in the paper, here extended to every method;
 #   * agreement with the domain "ground-truth" ranking stated in the paper.
 
-
-# Ground-truth importance tiers taken verbatim from Section 4 of the paper
-# (higher value = more important).  Only the features the paper explicitly
-# mentions are listed; the rest are left out of the correlation.  Keys use the
-# "logical" feature name; :func:`_resolve` maps them onto the actual (possibly
-# "_binned") columns of a bundle.
 GROUND_TRUTH: Dict[str, Dict[str, int]] = {
     "california": {"MedInc": 4, "Longitude": 3, "Latitude": 3,
                    "HouseAge": 2, "Population": 1, "AveBedrms": 1},
@@ -1071,12 +1064,12 @@ def quality_cost_table(bundle: ModelBundle, cfg: Config,
 # ---------------------------------------------------------------------------
 #
 # We re-run the usefulness experiment under ``uniform`` / ``quantile`` / ``kmeans``
-# discretisation and ask three questions:
+# discretization and ask three questions:
 #   * does model accuracy depend on the strategy?
 #   * does the *ranking* the usefulness score induces depend on the strategy?
 #     (measured by cross-strategy Spearman correlation and top-3 overlap);
 #   * does agreement with the domain ground truth depend on the strategy?
-# This directly quantifies how much the paper's discretisation choice matters.
+# This directly quantifies how much the paper's discretization choice matters.
 
 
 def mean_usefulness_importance(dataset: str, bins: int, strategy: str,
