@@ -83,3 +83,8 @@ comp["corr_spearman"]  # pairwise Spearman rank correlation between methods
   already in `datasets/`.
 * **Reproducibility of discretization.** `KBinsDiscretizer` is built with
   `subsample=None` so `quantile`/`kmeans` bin edges are deterministic.
+* **Plot typography.** `set_plot_style()` renders every figure's text through a
+  real LaTeX install (Computer Modern), for a look that matches a LaTeX-typeset
+  paper. This needs `latex`/`dvipng` on `PATH` (any TeX distribution, e.g.
+  TeX Live or MiKTeX); if none is found it automatically falls back to
+  matplotlib's bundled Computer-Modern-like fonts, so the code still runs.

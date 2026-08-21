@@ -73,15 +73,22 @@ def set_all_seeds(seed: int) -> None:
 def set_plot_style() -> None:
     """A clean, paper-friendly matplotlib style (colour-blind safe, legible).
 
-    Typography mimics a LaTeX-typeset paper: a serif face for all text and the
-    "cm" mathtext fontset for any embedded math, both bundled with matplotlib
-    (no system TeX install required, so this is portable everywhere).
+    Typography matches a LaTeX-typeset paper: every piece of text (titles,
+    labels, ticks, legends) is rendered *through* a real LaTeX install
+    (Computer Modern), via matplotlib's ``text.usetex``.  Falls back to
+    matplotlib's bundled "cm" mathtext fonts (still LaTeX-like, but with no
+    external dependency) if no ``latex`` binary is found on PATH, so the
+    module still works on a machine without a TeX distribution.
     """
+    import shutil
+    has_latex = shutil.which("latex") is not None
     plt.rcParams.update({
         "figure.dpi": 120,
         "savefig.dpi": 200,
+        "text.usetex": has_latex,
+        "text.latex.preamble": r"\usepackage{amsmath}",
         "font.family": "serif",
-        "font.serif": ["STIXGeneral", "cmr10", "DejaVu Serif"],
+        "font.serif": ["cmr10", "STIXGeneral", "DejaVu Serif"],
         "mathtext.fontset": "cm",
         "axes.formatter.use_mathtext": True,
         "font.size": 11,
@@ -97,6 +104,9 @@ def set_plot_style() -> None:
         "legend.frameon": False,
         "axes.prop_cycle": plt.cycler(color=COLOR_SCHEME),
     })
+    if not has_latex:
+        warnings.warn("No system LaTeX install found ('latex' not on PATH); falling back "
+                      "to matplotlib's bundled Computer-Modern-like fonts.")
 
 
 # ---------------------------------------------------------------------------
@@ -1039,13 +1049,14 @@ def plot_rank_correlation_heatmap(comparison: Dict[str, object], path_no_ext: st
     norm = mcolors.TwoSlopeNorm(vmin=-1, vcenter=0, vmax=1)          # neutral grey at 0
     im = ax.imshow(M.values, cmap="RdBu_r", norm=norm)
     ax.set_xticks(range(len(M))); ax.set_xticklabels(M.columns, rotation=30, ha="right")
-    ax.set_yticks(range(len(M))); ax.set_yticklabels(M.index)
+    ax.set_yticks(range(len(M)))
+    ax.set_yticklabels(M.index, rotation=30, ha="right", rotation_mode="anchor")
     for i in range(len(M)):
         for j in range(len(M)):
             ax.text(j, i, f"{M.values[i, j]:.2f}", ha="center", va="center", fontsize=8,
                     color="#111" if abs(M.values[i, j]) < 0.6 else "white")
     ax.set_title(f"Rank correlation between methods — {comparison['dataset']}")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Spearman ρ")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=r"Spearman $\rho$")
     _save(fig, path_no_ext)
 
 
@@ -1080,7 +1091,7 @@ def plot_scaling(scaling_df: pd.DataFrame, dataset: str, path_no_ext: str) -> No
     ax = axs[0]
     ax.plot(bins_df["bins"], bins_df["time_total_s"], "o-", color=COLOR_SCHEME[0])
     ax.set_yscale("log"); ax.set_xlabel("number of bins")
-    ax.set_ylabel("time, all features (s)"); ax.set_title("Time vs #bins")
+    ax.set_ylabel("time, all features (s)"); ax.set_title("Time vs number of bins")
 
     # right: time vs nodes, with an empirical power-law fit (theory check)
     ax = axs[1]
@@ -1202,7 +1213,7 @@ def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, pat
     for i, pl in enumerate(pair_label.unique()):
         d = stability[pair_label == pl].sort_values("bins")
         ax.plot(d["bins"], d["spearman"], "o-", color=COLOR_SCHEME[i], label=pl)
-    ax.set_xlabel("bins"); ax.set_ylabel("Spearman ρ between strategies")
+    ax.set_xlabel("bins"); ax.set_ylabel(r"Spearman $\rho$ between strategies")
     ax.set_title("How much the ranking moves with strategy"); ax.legend(title="pair")
 
     fig.suptitle(f"Binning-strategy sensitivity — {dataset}", fontweight="bold")

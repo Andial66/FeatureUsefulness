@@ -18,10 +18,10 @@ Dataset: bike_sharing
 [B] runtime profiling ...
     per-method runtime (s):
 method
-usefulness     0.4206
-permutation    0.2484
-shap           0.0309
-lime           0.7846
+usefulness     0.3970
+permutation    0.2469
+shap           0.0348
+lime           0.7472
     scorer speedup (deepcopy -> copy-free): 4.1x
 [C] binning-strategy sensitivity ...
     accuracy by strategy and bins:
