@@ -61,6 +61,9 @@ class Config:
     )
     # How many instances to use for the (sampling-based) importance methods.
     importance_sample: int = 200
+    # Persistence parameter of Rank-Biased Overlap (higher -> weighs the whole
+    # ranking more evenly; lower -> weighs only the very top of the ranking).
+    rbo_p: float = 0.9
     results_dir: str = "results_ext"
 
 
@@ -651,14 +654,19 @@ def normalize_importance(v: np.ndarray, how: str = "sum") -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# 4.  Comparing rankings: correlations and top-k overlap
+# 4.  Comparing rankings: correlations, top-k overlap, rank-biased overlap
 # ---------------------------------------------------------------------------
 #
 # Because the methods live on different scales, we compare the *rankings*
-# they induce, not the raw numbers.  Two complementary views:
-#   * rank correlation (Spearman / Kendall) between every pair of methods;
+# they induce, not the raw numbers.  Three complementary views:
+#   * rank correlation (Spearman / Kendall) between every pair of methods --
+#     treats every position in the ranking as equally important;
 #   * top-k overlap of each method with the usefulness score -- this is exactly
-#     the metric of Table 1 in the paper, here extended to every method.
+#     the metric of Table 1 in the paper, here extended to every method;
+#   * Rank-Biased Overlap (RBO) between every pair of methods -- unlike
+#     Spearman/Kendall, RBO is *top-weighted*, so it rewards two methods for
+#     agreeing on the most important features even if they disagree further
+#     down the ranking.
 
 
 def ranking_from_importance(imp: np.ndarray, features: Sequence[str]) -> List[str]:
@@ -690,6 +698,47 @@ def topk_intersection_vs(importances: Dict[str, np.ndarray], features: Sequence[
         r = ranking_from_importance(imp, features)
         rows[name] = {f"top-{k}": len(set(r[:k]) & set(ref_rank[:k])) for k in ks}
     return pd.DataFrame(rows).T
+
+
+def rank_biased_overlap(rank_a: Sequence[str], rank_b: Sequence[str], p: float = 0.9) -> float:
+    """Rank-Biased Overlap (Webber, Moffat & Zobel, 2010) between two complete
+    rankings of the same items.
+
+    Unlike Spearman/Kendall, RBO is *top-weighted*: agreement near the top of
+    the ranking counts for more than agreement near the bottom, which matches
+    how a ranking of feature importances is actually read.  ``p`` sets how
+    quickly that weight decays with depth: closer to 0 -> only the very top
+    matters; closer to 1 -> the whole ranking matters almost equally.  Returns
+    1.0 for identical rankings.
+    """
+    k = len(rank_a)
+    if k == 0:
+        return 1.0
+    set_a, set_b = set(), set()
+    overlap = 0
+    weighted_sum = 0.0
+    for d in range(1, k + 1):
+        set_a.add(rank_a[d - 1])
+        set_b.add(rank_b[d - 1])
+        overlap = len(set_a & set_b)
+        weighted_sum += (overlap / d) * (p ** d)
+    x_k = overlap / k                                   # = 1.0 here: both rank the same feature set
+    return (1 - p) / p * weighted_sum + x_k * p ** k
+
+
+def rank_biased_overlap_matrix(importances: Dict[str, np.ndarray], features: Sequence[str],
+                               p: float = 0.9) -> pd.DataFrame:
+    """Pairwise Rank-Biased Overlap between the rankings the methods induce."""
+    names = list(importances)
+    rankings = {m: ranking_from_importance(importances[m], features) for m in names}
+    M = pd.DataFrame(np.eye(len(names)), index=names, columns=names)
+    for i, a in enumerate(names):
+        for j, b in enumerate(names):
+            if j <= i:
+                continue
+            r = rank_biased_overlap(rankings[a], rankings[b], p=p)
+            M.loc[a, b] = M.loc[b, a] = r
+    return M
 
 
 # ---------------------------------------------------------------------------
@@ -730,33 +779,72 @@ def profile_usefulness(bundle: ModelBundle, repeat: int = 5) -> Dict[str, float]
 
 def scaling_experiment(dataset: str, cfg: Config, strategy: str = "uniform",
                        bins_list: Optional[Sequence[int]] = None,
-                       leaves_list: Sequence[int] = (50, 100, 200, 400, 800, 1600, 3200, 6400),
                        seed: Optional[int] = None) -> pd.DataFrame:
-    """Sweep #bins and tree size (max_leaf_nodes) and profile the usefulness algo.
+    """Sweep #bins and profile the usefulness algorithm's own runtime.
 
-    Two sweeps are combined into one tidy table:
-      * vary ``bins`` at a fixed, generous leaf budget (cost vs domain size);
-      * vary ``max_leaf_nodes`` at fixed bins (cost vs tree size).
+    Varies ``bins`` at a fixed, generous leaf budget, isolating how the
+    usefulness score's cost grows with the categorical entity-space size.
+    (For how *every* method's runtime scales with tree size instead, see
+    :func:`method_scaling_experiment`.)
     """
     seed = cfg.seed if seed is None else seed
     bins_list = list(cfg.bins_grid) if bins_list is None else list(bins_list)
     rows = []
-
-    # Sweep 1: number of bins (tree left large so it can actually use them).
     for bins in bins_list:
         b = train_tree(dataset, bins=bins, strategy=strategy, seed=seed, leaves=100 * bins)
-        r = profile_usefulness(b)
-        r["sweep"] = "bins"
-        rows.append(r)
+        rows.append(profile_usefulness(b))
+    return pd.DataFrame(rows)
 
-    # Sweep 2: tree size, bins fixed at the middle of the grid.
-    fixed_bins = bins_list[len(bins_list) // 2]
+
+def method_scaling_experiment(dataset: str, cfg: Config, strategy: str = "uniform",
+                              bins: Optional[int] = None,
+                              leaves_list: Optional[Sequence[int]] = None,
+                              methods: Sequence[str] = ("usefulness", "permutation",
+                                                        "shap", "lime"),
+                              repeat: int = 10, seed: Optional[int] = None) -> pd.DataFrame:
+    """Wall-clock of *every* importance method vs tree size (one line per method).
+
+    Bins are held fixed (middle of ``cfg.bins_grid`` by default) while
+    ``max_leaf_nodes`` is swept over a fine, log-spaced grid (14 points from 25
+    to 6400 leaves by default -- denser than :func:`scaling_experiment`'s
+    tree-size sweep used to be).  Each (method, tree size) pair is timed
+    ``repeat`` times, so the run-to-run measurement noise (mean +/- std) is
+    visible, rather than a single best-of estimate.
+    """
+    seed = cfg.seed if seed is None else seed
+    bins = cfg.bins_grid[len(cfg.bins_grid) // 2] if bins is None else bins
+    if leaves_list is None:
+        leaves_list = [int(round(x)) for x in np.geomspace(25, 6400, 14)]
+
+    rows = []
+    warmed_up = set()
     for leaves in leaves_list:
-        b = train_tree(dataset, bins=fixed_bins, strategy=strategy, seed=seed, leaves=leaves)
-        r = profile_usefulness(b)
-        r["sweep"] = "leaves"
-        rows.append(r)
-
+        b = train_tree(dataset, bins=bins, strategy=strategy, seed=seed, leaves=leaves)
+        n_nodes = int(b.clf.tree_.node_count)
+        for m in methods:
+            if m not in warmed_up:                      # untimed warm-up (e.g. SHAP numba JIT)
+                try:
+                    compute_all_importances(b, cfg, methods=(m,))
+                except Exception:
+                    pass
+                warmed_up.add(m)
+            times = []
+            for _ in range(repeat):
+                try:
+                    _, timings = compute_all_importances(b, cfg, methods=(m,))
+                except Exception as exc:
+                    warnings.warn(f"{m} skipped at leaves={leaves}: {exc!r}")
+                    break
+                if m in timings:
+                    times.append(timings[m])
+            if times:
+                arr = np.asarray(times)
+                rows.append({
+                    "dataset": dataset, "bins": bins, "leaves": leaves, "n_nodes": n_nodes,
+                    "method": m, "time_mean_s": float(arr.mean()), "time_std_s": float(arr.std()),
+                    "time_min_s": float(arr.min()), "time_max_s": float(arr.max()),
+                    "n_repeats": len(times),
+                })
     return pd.DataFrame(rows)
 
 
@@ -848,10 +936,13 @@ def run_binning_experiment(dataset: str, cfg: Config, n_models: Optional[int] = 
                            strategies: Optional[Sequence[str]] = None,
                            seed: Optional[int] = None
                            ) -> Dict[str, pd.DataFrame]:
-    """Full binning sensitivity run, returning three tidy tables.
+    """Full binning sensitivity run, returning four tidy tables.
 
-    Returns ``{"summary", "stability", "importance"}`` DataFrames, suitable both
-    for the plots in :func:`plot_binning_sensitivity` and for saving to CSV.
+    Returns ``{"summary", "stability", "bins_stability", "importance"}``
+    DataFrames, suitable both for the plots in :func:`plot_binning_sensitivity`
+    and for saving to CSV.  ``stability`` compares strategies at each fixed
+    bin count; ``bins_stability`` compares bin counts at each fixed strategy --
+    both report Spearman, Rank-Biased Overlap (``cfg.rbo_p``), and top-3 overlap.
     """
     n_models = cfg.n_models if n_models is None else n_models
     bins_grid = list(cfg.bins_grid) if bins_grid is None else list(bins_grid)
@@ -876,22 +967,41 @@ def run_binning_experiment(dataset: str, cfg: Config, n_models: Optional[int] = 
                 importance_rows.append({"strategy": strategy, "bins": bins,
                                         "feature": f.replace("_binned", ""), "importance": val})
 
-    # cross-strategy stability at each bin count
+    # cross-strategy stability at each bin count (does the ranking depend on
+    # *how* we discretize, holding the number of bins fixed?)
     stability_rows = []
     for bins in bins_grid:
         for i, sa in enumerate(strategies):
             for sb in strategies[i + 1:]:
                 va, vb = mean_imp[(sa, bins)], mean_imp[(sb, bins)]
-                rho = spearmanr(va, vb).correlation
                 ra = ranking_from_importance(va, features_ref)
                 rb = ranking_from_importance(vb, features_ref)
-                overlap3 = len(set(ra[:3]) & set(rb[:3]))
-                stability_rows.append({"dataset": dataset, "bins": bins,
-                                       "strategy_a": sa, "strategy_b": sb,
-                                       "spearman": rho, "top3_overlap": overlap3})
+                stability_rows.append({
+                    "dataset": dataset, "bins": bins, "strategy_a": sa, "strategy_b": sb,
+                    "spearman": spearmanr(va, vb).correlation,
+                    "rbo": rank_biased_overlap(ra, rb, p=cfg.rbo_p),
+                    "top3_overlap": len(set(ra[:3]) & set(rb[:3])),
+                })
+
+    # cross-bins-count stability at each strategy (does the ranking depend on
+    # *how many* bins we use, holding the discretization strategy fixed?)
+    bins_stability_rows = []
+    for strategy in strategies:
+        for i, ba in enumerate(bins_grid):
+            for bb in bins_grid[i + 1:]:
+                va, vb = mean_imp[(strategy, ba)], mean_imp[(strategy, bb)]
+                ra = ranking_from_importance(va, features_ref)
+                rb = ranking_from_importance(vb, features_ref)
+                bins_stability_rows.append({
+                    "dataset": dataset, "strategy": strategy, "bins_a": ba, "bins_b": bb,
+                    "spearman": spearmanr(va, vb).correlation,
+                    "rbo": rank_biased_overlap(ra, rb, p=cfg.rbo_p),
+                    "top3_overlap": len(set(ra[:3]) & set(rb[:3])),
+                })
 
     return {"summary": pd.DataFrame(summary_rows),
             "stability": pd.DataFrame(stability_rows),
+            "bins_stability": pd.DataFrame(bins_stability_rows),
             "importance": pd.DataFrame(importance_rows)}
 
 
@@ -972,6 +1082,8 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
     Aggregates (like the paper's Table 1) across models and returns:
       * ``topk``          - mean top-k overlap of each method with usefulness;
       * ``corr_spearman`` - mean pairwise Spearman rank-correlation matrix;
+      * ``rbo``           - mean pairwise Rank-Biased Overlap matrix (top-weighted;
+                            persistence ``cfg.rbo_p``);
       * ``mean_importance`` - mean normalised importance per (feature, method);
       * ``features``      - feature order (by mean usefulness), for plotting.
     """
@@ -980,7 +1092,7 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
     leaves = cfg.leaves_per_bin[dataset] * bins
     rng = random.Random(seed)
 
-    topk_frames, corr_frames = [], []
+    topk_frames, corr_frames, rbo_frames = [], [], []
     imp_accum: Dict[str, np.ndarray] = {}
     features: List[str] = []
 
@@ -992,6 +1104,7 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
         present = [m for m in methods if m in imp]
 
         topk_frames.append(topk_intersection_vs(imp, features).loc[present])
+        rbo_frames.append(rank_biased_overlap_matrix({m: imp[m] for m in present}, features, p=cfg.rbo_p))
         corr_frames.append(rank_correlation_matrix({m: imp[m] for m in present}))
         for m in present:
             nv = normalize_importance(imp[m])
@@ -1005,6 +1118,7 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
         "dataset": dataset, "bins": bins, "n_models": n_models,
         "topk": _mean_of_frames(topk_frames),
         "corr_spearman": _mean_of_frames(corr_frames),
+        "rbo": _mean_of_frames(rbo_frames),
         "mean_importance": mean_importance,
         "features": [f.replace("_binned", "") for f in features],
     }
@@ -1060,6 +1174,25 @@ def plot_rank_correlation_heatmap(comparison: Dict[str, object], path_no_ext: st
     _save(fig, path_no_ext)
 
 
+def plot_rank_biased_overlap_heatmap(comparison: Dict[str, object], path_no_ext: str) -> None:
+    """Mean pairwise Rank-Biased Overlap between methods (top-weighted; unlike
+    Spearman/Kendall, RBO lives in [0, 1], so this uses a sequential colormap
+    rather than a diverging one."""
+    M = comparison["rbo"]
+    fig, ax = plt.subplots(figsize=(0.9 * len(M) + 2, 0.9 * len(M) + 1.5))
+    im = ax.imshow(M.values, cmap="viridis", vmin=0, vmax=1)
+    ax.set_xticks(range(len(M))); ax.set_xticklabels(M.columns, rotation=30, ha="right")
+    ax.set_yticks(range(len(M)))
+    ax.set_yticklabels(M.index, rotation=30, ha="right", rotation_mode="anchor")
+    for i in range(len(M)):
+        for j in range(len(M)):
+            ax.text(j, i, f"{M.values[i, j]:.2f}", ha="center", va="center", fontsize=8,
+                    color="#111" if M.values[i, j] > 0.6 else "white")
+    ax.set_title(f"Rank-Biased Overlap between methods — {comparison['dataset']}")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="RBO")
+    _save(fig, path_no_ext)
+
+
 def plot_topk_intersection(comparison: Dict[str, object], path_no_ext: str) -> None:
     """Top-k overlap of each method with the usefulness ranking (extends Table 1)."""
     df = comparison["topk"].drop(index=["usefulness"], errors="ignore")
@@ -1078,38 +1211,72 @@ def plot_topk_intersection(comparison: Dict[str, object], path_no_ext: str) -> N
 
 
 def plot_scaling(scaling_df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
-    """Runtime vs #bins and vs #tree-nodes.
+    """Usefulness-score runtime vs number of bins (entity-space size).
 
-    A single row: the left panel varies the number of bins, the right panel
-    varies the tree size.
+    (For runtime vs tree size, across every method, see
+    :func:`plot_method_scaling` instead.)
     """
-    bins_df = scaling_df[scaling_df["sweep"] == "bins"].sort_values("bins")
-    leaf_df = scaling_df[scaling_df["sweep"] == "leaves"].sort_values("n_nodes")
-    fig, axs = plt.subplots(1, 2, figsize=(13, 4.8))
-
-    # left: time vs bins
-    ax = axs[0]
-    ax.plot(bins_df["bins"], bins_df["time_total_s"], "o-", color=COLOR_SCHEME[0])
+    df = scaling_df.sort_values("bins")
+    fig, ax = plt.subplots(figsize=(7, 4.8))
+    ax.plot(df["bins"], df["time_total_s"], "o-", color=COLOR_SCHEME[0])
     ax.set_yscale("log"); ax.set_xlabel("number of bins")
     ax.set_ylabel("time, all features (s)"); ax.set_title("Time vs number of bins")
-
-    # right: time vs nodes, with an empirical power-law fit (theory check)
-    ax = axs[1]
-    ax.plot(leaf_df["n_nodes"], leaf_df["time_total_s"], "o-", color=COLOR_SCHEME[0], label="measured")
-    x = leaf_df["n_nodes"].to_numpy(float)
-    y = leaf_df["time_total_s"].to_numpy(float)
-    if len(x) >= 2 and (x > 0).all() and (y > 0).all():
-        slope, intercept = np.polyfit(np.log(x), np.log(y), 1)   # log-log fit -> exponent
-        xs = np.array([x.min(), x.max()])
-        ax.plot(xs, np.exp(intercept) * xs ** slope, "--", color=COLOR_SCHEME[7],
-                label=fr"fit $\propto |T|^{{{slope:.2f}}}$")
-        ax.legend()
-    ax.set_yscale("log"); ax.set_xscale("log"); ax.set_xlabel("number of tree nodes")
-    ax.set_ylabel("time, all features (s)"); ax.set_title("Time vs tree size")
 
     fig.suptitle(f"Usefulness-score scaling — {dataset}", fontweight="bold")
     fig.tight_layout()
     _save(fig, path_no_ext)
+
+
+def plot_method_scaling(df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
+    """Runtime vs tree size for every method in ``df`` (log-log, mean line + std
+    band), plus a companion bar chart of each method's timing variance
+    (coefficient of variation, averaged across tree sizes).
+
+    Saved as two separate images -- ``{path_no_ext}_runtime.png`` and
+    ``{path_no_ext}_variance.png`` -- so either can be dropped into a paper on
+    its own.  Pass a pre-filtered ``df`` (e.g. only the "usefulness"/"shap"
+    rows) for a focused head-to-head of just those methods.
+    """
+    methods_present = list(df["method"].unique())
+
+    # time vs tree size, one line + std band per method
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for m in methods_present:
+        d = df[df["method"] == m].sort_values("n_nodes")
+        color = METHOD_COLORS.get(m, COLOR_SCHEME[7])
+        ax.plot(d["n_nodes"], d["time_mean_s"], "o-", color=color, label=m)
+        lo = np.clip(d["time_mean_s"] - d["time_std_s"], 1e-6, None)
+        hi = d["time_mean_s"] + d["time_std_s"]
+        ax.fill_between(d["n_nodes"], lo, hi, color=color, alpha=0.15, linewidth=0)
+    if "usefulness" in methods_present:                # power-law fit, as a complexity check
+        d = df[df["method"] == "usefulness"].sort_values("n_nodes")
+        x, y = d["n_nodes"].to_numpy(float), d["time_mean_s"].to_numpy(float)
+        if len(x) >= 2 and (x > 0).all() and (y > 0).all():
+            slope, intercept = np.polyfit(np.log(x), np.log(y), 1)
+            xs = np.array([x.min(), x.max()])
+            ax.plot(xs, np.exp(intercept) * xs ** slope, "--",
+                    color=METHOD_COLORS.get("usefulness", "black"), linewidth=1,
+                    label=fr"usefulness fit $\propto |T|^{{{slope:.2f}}}$")
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("number of tree nodes"); ax.set_ylabel("time, all features (s)")
+    ax.set_title(f"Runtime vs tree size, per method — {dataset}")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    _save(fig, f"{path_no_ext}_runtime")
+
+    # timing variance per method (coefficient of variation, averaged over sizes)
+    fig, ax = plt.subplots(figsize=(1.6 * len(methods_present) + 2, 4.5))
+    cv = (df["time_std_s"] / df["time_mean_s"]).groupby(df["method"]).mean()
+    order = [m for m in ("usefulness", "permutation", "shap", "lime") if m in cv.index]
+    cv = cv.reindex(order)
+    colors = [METHOD_COLORS.get(m, COLOR_SCHEME[7]) for m in order]
+    ax.bar(order, cv.values, color=colors, edgecolor="black", linewidth=0.6)
+    ax.set_xticks(range(len(order))); ax.set_xticklabels(order, rotation=20, ha="right")
+    ax.set_ylabel("coeff. of variation (std / mean)")
+    n_reps = int(df["n_repeats"].iloc[0]) if len(df) else 0
+    ax.set_title(f"Timing variance across tree sizes — {dataset}\n({n_reps} reps/size)")
+    fig.tight_layout()
+    _save(fig, f"{path_no_ext}_variance")
 
 
 # ---------------------------------------------------------------------------
@@ -1194,35 +1361,71 @@ def plot_scorer_speedup(speedups: pd.DataFrame, path_no_ext: str) -> None:
 
 
 def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, path_no_ext: str) -> None:
-    """Two panels: accuracy and cross-strategy ranking stability."""
+    """Binning-strategy sensitivity, saved as separate images so any one can
+    stand alone in a paper:
+      * ``{path_no_ext}_accuracy.png``          - accuracy vs bins, per strategy;
+      * ``{path_no_ext}_stability.png``         - cross-strategy Spearman rho
+        (fixed bins) -- every position in the ranking weighted equally;
+      * ``{path_no_ext}_stability_rbo.png``     - cross-strategy Rank-Biased
+        Overlap (fixed bins) -- top-weighted;
+      * ``{path_no_ext}_bins_stability.png``    - cross-bins-count Spearman rho
+        (fixed strategy);
+      * ``{path_no_ext}_bins_stability_rbo.png``- cross-bins-count Rank-Biased
+        Overlap (fixed strategy).
+    """
     summary, stability = binning["summary"], binning["stability"]
+    bins_stability = binning["bins_stability"]
     strategies = list(summary["strategy"].unique())
-    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
 
-    # (1) accuracy vs bins per strategy
-    ax = axs[0]
+    # accuracy vs bins per strategy
+    fig, ax = plt.subplots(figsize=(6.5, 5))
     for i, s in enumerate(strategies):
         d = summary[summary["strategy"] == s].sort_values("bins")
         ax.plot(d["bins"], d["accuracy"], "o-", color=COLOR_SCHEME[i], label=s)
-    ax.set_xlabel("bins"); ax.set_ylabel("test accuracy"); ax.set_title("Accuracy vs binning")
+    ax.set_xlabel("bins"); ax.set_ylabel("test accuracy")
+    ax.set_title(f"Accuracy vs binning — {dataset}")
     ax.legend(title="strategy")
+    fig.tight_layout()
+    _save(fig, f"{path_no_ext}_accuracy")
 
-    # (2) cross-strategy ranking agreement (Spearman) vs bins
-    ax = axs[1]
+    # cross-strategy ranking agreement vs bins -- one image per metric
     pair_label = stability["strategy_a"] + "–" + stability["strategy_b"]
-    for i, pl in enumerate(pair_label.unique()):
-        d = stability[pair_label == pl].sort_values("bins")
-        ax.plot(d["bins"], d["spearman"], "o-", color=COLOR_SCHEME[i], label=pl)
-    ax.set_xlabel("bins"); ax.set_ylabel(r"Spearman $\rho$ between strategies")
-    ax.set_title("How much the ranking moves with strategy"); ax.legend(title="pair")
+    for metric, ylabel, fname in [("spearman", r"Spearman $\rho$ between strategies", "stability"),
+                                  ("rbo", "RBO between strategies", "stability_rbo")]:
+        fig, ax = plt.subplots(figsize=(6.5, 5))
+        for i, pl in enumerate(pair_label.unique()):
+            d = stability[pair_label == pl].sort_values("bins")
+            ax.plot(d["bins"], d[metric], "o-", color=COLOR_SCHEME[i], label=pl)
+        ax.set_xlabel("bins"); ax.set_ylabel(ylabel)
+        if metric == "rbo":
+            ax.set_ylim(0, 1.02)
+        ax.set_title(f"How much the ranking moves with strategy — {dataset}")
+        ax.legend(title="pair")
+        fig.tight_layout()
+        _save(fig, f"{path_no_ext}_{fname}")
 
-    fig.suptitle(f"Binning-strategy sensitivity — {dataset}", fontweight="bold")
-    _save(fig, path_no_ext)
+    # cross-bins-count ranking agreement per strategy -- one image per metric
+    bpair_label = bins_stability["bins_a"].astype(str) + "–" + bins_stability["bins_b"].astype(str)
+    for metric, ylabel, fname in [("spearman", r"Spearman $\rho$ between bin counts", "bins_stability"),
+                                  ("rbo", "RBO between bin counts", "bins_stability_rbo")]:
+        fig, ax = plt.subplots(figsize=(6.5, 5))
+        for i, s in enumerate(strategies):
+            mask = bins_stability["strategy"] == s
+            d = bins_stability[mask].assign(pair=bpair_label[mask]).sort_values(["bins_a", "bins_b"])
+            ax.plot(d["pair"], d[metric], "o-", color=COLOR_SCHEME[i], label=s)
+        ax.set_xlabel("bin-count pair"); ax.set_ylabel(ylabel)
+        if metric == "rbo":
+            ax.set_ylim(0, 1.02)
+        ax.set_title(f"How much the ranking moves with number of bins — {dataset}")
+        ax.legend(title="strategy")
+        fig.tight_layout()
+        _save(fig, f"{path_no_ext}_{fname}")
 
 
 def plot_scores(scores: Dict[str, object], dataset: str, path_no_ext: str) -> None:
-    """Reproduce the paper's usefulness-score figure (Fig. 4 / 5): one panel per
-    bin count, horizontal bars at the median with Q1–Q3 whiskers and mean accuracy."""
+    """Reproduce the paper's usefulness-score figure (Fig. 4 / 5): one image per
+    bin count (``{path_no_ext}_{bins}bins.png``), horizontal bars at the median
+    with Q1–Q3 whiskers and mean accuracy."""
     per_bins = scores["per_bins"]
     bins_list = sorted(per_bins)
     titles = {"california": "California Housing", "adult_income": "Adult Income",
@@ -1230,11 +1433,9 @@ def plot_scores(scores: Dict[str, object], dataset: str, path_no_ext: str) -> No
     color = {"california": COLOR_SCHEME[5], "adult_income": COLOR_SCHEME[1],
              "bike_sharing": COLOR_SCHEME[3]}.get(dataset, COLOR_SCHEME[0])
 
-    fig, axs = plt.subplots(1, len(bins_list), figsize=(5 * len(bins_list), 6))
-    if len(bins_list) == 1:
-        axs = [axs]
-    for ax, bins in zip(axs, bins_list):
+    for bins in bins_list:
         d = per_bins[bins]
+        fig, ax = plt.subplots(figsize=(5, 6))
         y = np.arange(len(d["labels"]))
         ax.barh(y, d["median"], color=color, alpha=0.4, edgecolor="black", height=0.6)
         for yi, q1, q3 in zip(y, d["q1"], d["q3"]):          # Q1–Q3 whisker with end ticks
@@ -1246,6 +1447,6 @@ def plot_scores(scores: Dict[str, object], dataset: str, path_no_ext: str) -> No
         ax.ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
         ax.text(0.5, -0.12, f"Avg Acc = {d['mean_accuracy']:.3f}", transform=ax.transAxes,
                 ha="center", va="top", bbox=dict(facecolor="white", edgecolor="black"))
-    fig.suptitle(f"Usefulness score — {titles.get(dataset, dataset)}", fontweight="bold", y=1.04)
-    fig.tight_layout()
-    _save(fig, path_no_ext)
+        fig.suptitle(f"Usefulness score — {titles.get(dataset, dataset)}", fontweight="bold", y=1.04)
+        fig.tight_layout()
+        _save(fig, f"{path_no_ext}_{bins}bins")

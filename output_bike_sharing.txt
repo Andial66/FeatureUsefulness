@@ -15,14 +15,18 @@ Dataset: bike_sharing
       shap                   0.920
       permutation            0.875
       lime                   0.708
+    mean Rank-Biased Overlap with usefulness (p=0.9):
+      shap                   0.925
+      permutation            0.913
+      lime                   0.844
 [B] runtime profiling ...
     per-method runtime (s):
 method
-usefulness     0.3970
-permutation    0.2469
-shap           0.0348
-lime           0.7472
-    scorer speedup (deepcopy -> copy-free): 4.1x
+usefulness     0.3837
+permutation    0.2375
+shap           0.0336
+lime           0.7656
+    scorer speedup (deepcopy -> copy-free): 4.8x
 [C] binning-strategy sensitivity ...
     accuracy by strategy and bins:
 strategy  bins  accuracy
@@ -38,5 +42,9 @@ quantile     6     0.851
   kmeans     4     0.846
   kmeans     5     0.840
   kmeans     6     0.855
+    cross-strategy ranking agreement (mean, fixed bins), p=0.9:
+      Spearman rho = 0.815   RBO = 0.911
+    cross-#bins ranking agreement (mean, fixed strategy), p=0.9:
+      Spearman rho = 0.820   RBO = 0.890
 
 Done. Tables and figures written to 'results/'.

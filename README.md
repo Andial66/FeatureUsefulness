@@ -33,17 +33,27 @@ score alongside:
 * **SHAP** (TreeSHAP — the paper’s baseline),
 * **LIME** (local surrogates, aggregated to a global score).
 
+The methods' *rankings* are then compared three ways: pairwise Spearman/Kendall
+correlation (every position weighted equally), top-k overlap with the usefulness
+ranking (paper's Table 1, extended to every method), and pairwise **Rank-Biased
+Overlap** (`rank_biased_overlap()` — top-weighted, so two methods agreeing on the
+most important features counts for more than agreeing further down the list).
+
 ### (B) Runtime analysis
-`scaling_experiment()` + `method_runtime_comparison()` measure how the usefulness
-algorithm **scales with #bins and tree size** (wall-clock via `time.perf_counter`;
-the tree-size panel overlays a fitted power law so empirical ≈ theoretical
-complexity), and the **cost of every method** on the same model.
+`scaling_experiment()` measures how the usefulness algorithm **scales with #bins**
+(wall-clock via `time.perf_counter`). `method_runtime_comparison()` measures the
+**cost of every method** on the same model. `method_scaling_experiment()` compares
+**every method's runtime as tree size grows** (one line per method, log-log, with
+a fitted power law for usefulness), each point repeated 10x so the measurement
+noise is shown as a mean ± std band and a coefficient-of-variation bar chart.
 
 ### (C) Binning-strategy sensitivity
 `run_binning_experiment()` re-runs the usefulness experiment under
-`uniform` / `quantile` / `kmeans` discretisation and reports, per strategy and #bins:
-model accuracy and **cross-strategy ranking stability** (how much the induced
-ranking moves when you change the binning).
+`uniform` / `quantile` / `kmeans` discretisation and reports, per strategy and #bins,
+model accuracy plus **ranking stability** two ways: cross-strategy (fixed #bins)
+and cross-#bins (fixed strategy), each measured with both Spearman rho and
+Rank-Biased Overlap, so top-of-ranking stability is visible alongside overall
+rank stability.
 
 ---
 

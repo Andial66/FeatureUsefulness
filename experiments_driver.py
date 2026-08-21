@@ -108,13 +108,19 @@ def main(argv=None) -> None:
                                                 methods=methods, n_models=args.n_models)
             comp["topk"].to_csv(f"{tag}_topk_overlap.csv")
             comp["corr_spearman"].to_csv(f"{tag}_rank_correlation.csv")
+            comp["rbo"].to_csv(f"{tag}_rank_biased_overlap.csv")
             comp["mean_importance"].to_csv(f"{tag}_mean_importance.csv")
             ux.plot_method_importance_heatmap(comp, f"{tag}_importance_heatmap")
             ux.plot_rank_correlation_heatmap(comp, f"{tag}_rank_correlation")
+            ux.plot_rank_biased_overlap_heatmap(comp, f"{tag}_rank_biased_overlap")
             ux.plot_topk_intersection(comp, f"{tag}_topk_overlap")
             print("    mean Spearman rank correlation with usefulness:")
             corr = comp["corr_spearman"]["usefulness"].drop("usefulness", errors="ignore")
             for m, r in corr.sort_values(ascending=False).items():
+                print(f"      {m:22s} {r:.3f}")
+            print(f"    mean Rank-Biased Overlap with usefulness (p={cfg.rbo_p}):")
+            rbo = comp["rbo"]["usefulness"].drop("usefulness", errors="ignore")
+            for m, r in rbo.sort_values(ascending=False).items():
                 print(f"      {m:22s} {r:.3f}")
 
         # ---- (B) runtime analysis ------------------------------------------
@@ -123,6 +129,16 @@ def main(argv=None) -> None:
             scaling = ux.scaling_experiment(ds, cfg, strategy="uniform")
             scaling.to_csv(f"{tag}_scaling.csv", index=False)
             ux.plot_scaling(scaling, ds, f"{tag}_scaling")
+
+            # runtime vs tree size, every method, repeated for variance
+            method_scaling = ux.method_scaling_experiment(ds, cfg, strategy="uniform", methods=methods)
+            method_scaling.to_csv(f"{tag}_method_scaling.csv", index=False)
+            ux.plot_method_scaling(method_scaling, ds, f"{tag}_method_scaling")
+
+            # focused head-to-head: usefulness vs SHAP (both structure-aware methods)
+            if {"usefulness", "shap"}.issubset(method_scaling["method"].unique()):
+                uf_shap = method_scaling[method_scaling["method"].isin(["usefulness", "shap"])]
+                ux.plot_method_scaling(uf_shap, ds, f"{tag}_method_scaling_usefulness_vs_shap")
 
             model = ux.train_tree(ds, bins=args.bins, strategy="uniform",
                                   seed=args.seed, leaves=cfg.leaves_per_bin[ds] * args.bins)
@@ -148,6 +164,12 @@ def main(argv=None) -> None:
             print("    accuracy by strategy and bins:")
             print(binning["summary"][["strategy", "bins", "accuracy"]]
                   .round(3).to_string(index=False))
+            print(f"    cross-strategy ranking agreement (mean, fixed bins), p={cfg.rbo_p}:")
+            print(f"      Spearman rho = {binning['stability']['spearman'].mean():.3f}   "
+                  f"RBO = {binning['stability']['rbo'].mean():.3f}")
+            print(f"    cross-#bins ranking agreement (mean, fixed strategy), p={cfg.rbo_p}:")
+            print(f"      Spearman rho = {binning['bins_stability']['spearman'].mean():.3f}   "
+                  f"RBO = {binning['bins_stability']['rbo'].mean():.3f}")
 
     print(f"\nDone. Tables and figures written to '{args.out}/'.")
 
