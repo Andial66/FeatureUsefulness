@@ -1,4 +1,4 @@
-Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "mdi", "permutation", "shap", "lime", "integrated_gradients"], "datasets": ["adult_income"], "experiments": ["synthetic", "scores", "comparison", "profiling", "binning"]}
+Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "permutation", "shap", "lime"], "datasets": ["adult_income"], "experiments": ["synthetic", "scores", "comparison", "profiling", "binning"]}
 run_tree_tests: all assertions passed
 
 [synthetic] controlled-feature study (known ground truth) ...
@@ -17,22 +17,18 @@ Dataset: adult_income
 [A] comparison of importance methods ...
     ground-truth agreement (Spearman ρ, mean [95% CI]):
       usefulness             0.878 [0.878, 0.878]
-      mdi                    0.878 [0.878, 0.878]
       permutation            0.879 [0.878, 0.880]
       shap                   0.878 [0.878, 0.878]
       lime                   0.878 [0.878, 0.878]
-      integrated_gradients   0.839 [0.790, 0.878]
     paired Wilcoxon usefulness vs SHAP: p = 1 (n=20)  rankings identical across models -> no detectable difference
 [B] runtime & memory profiling ...
     per-method runtime (s):
 method
-usefulness              1.0236
-mdi                     0.0000
-permutation             0.2164
-shap                    0.0477
-lime                    0.5924
-integrated_gradients    8.3498
-    scorer speedup (deepcopy -> copy-free): 3.3x
+usefulness     1.0542
+permutation    0.3173
+shap           0.0641
+lime           0.8408
+    scorer speedup (deepcopy -> copy-free): 3.9x
 [C] binning-strategy sensitivity ...
     accuracy / ground-truth ρ by strategy and bins:
 strategy  bins  accuracy  spearman_gt

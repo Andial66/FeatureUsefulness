@@ -1,9 +1,5 @@
-Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "mdi", "permutation", "shap", "lime", "integrated_gradients"], "datasets": ["bike_sharing"], "experiments": ["synthetic", "scores", "comparison", "profiling", "binning"]}
+Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "permutation", "shap", "lime"], "datasets": ["bike_sharing"], "experiments": ["scores", "comparison", "profiling", "binning"]}
 run_tree_tests: all assertions passed
-
-[synthetic] controlled-feature study (known ground truth) ...
-    clean recovery: accuracy=1.000, Spearman(emp,true)=1.000, noise AUC=1.000
-    redundancy: x0+x0_copy=0.25 (true x0=0.25)
 
 ======================================================================
 Dataset: bike_sharing
@@ -15,38 +11,32 @@ Dataset: bike_sharing
       5 bins: hr                   (mean acc 0.839)
       6 bins: hr                   (mean acc 0.851)
 [A] comparison of importance methods ...
-    ground-truth agreement (Spearman ρ, mean [95% CI]):
-      usefulness             0.938 [0.917, 0.949]
-      mdi                    0.938 [0.917, 0.949]
-      permutation            0.949 [0.949, 0.949]
-      shap                   0.938 [0.917, 0.949]
-      lime                   0.833 [0.780, 0.885]
-      integrated_gradients   0.917 [0.885, 0.949]
-    paired Wilcoxon usefulness vs SHAP: p = 1 (n=20)  rankings identical across models -> no detectable difference
-[B] runtime & memory profiling ...
+    mean Spearman rank correlation with usefulness:
+      shap                   0.920
+      permutation            0.875
+      lime                   0.708
+[B] runtime profiling ...
     per-method runtime (s):
 method
-usefulness              0.3745
-mdi                     0.0000
-permutation             0.1439
-shap                    0.0237
-lime                    0.5405
-integrated_gradients    5.4628
-    scorer speedup (deepcopy -> copy-free): 3.3x
+usefulness     0.4206
+permutation    0.2484
+shap           0.0309
+lime           0.7846
+    scorer speedup (deepcopy -> copy-free): 4.1x
 [C] binning-strategy sensitivity ...
-    accuracy / ground-truth ρ by strategy and bins:
-strategy  bins  accuracy  spearman_gt
- uniform     3     0.841        0.949
- uniform     4     0.845        0.949
- uniform     5     0.839        0.949
- uniform     6     0.851        0.949
-quantile     3     0.842        0.949
-quantile     4     0.849        0.949
-quantile     5     0.833        0.949
-quantile     6     0.851        0.949
-  kmeans     3     0.845        0.949
-  kmeans     4     0.846        0.949
-  kmeans     5     0.840        0.949
-  kmeans     6     0.855        0.949
+    accuracy by strategy and bins:
+strategy  bins  accuracy
+ uniform     3     0.841
+ uniform     4     0.845
+ uniform     5     0.839
+ uniform     6     0.851
+quantile     3     0.842
+quantile     4     0.849
+quantile     5     0.834
+quantile     6     0.851
+  kmeans     3     0.845
+  kmeans     4     0.846
+  kmeans     5     0.840
+  kmeans     6     0.855
 
 Done. Tables and figures written to 'results/'.

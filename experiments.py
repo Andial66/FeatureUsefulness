@@ -4,7 +4,6 @@ import math
 import time
 import random
 import warnings
-import tracemalloc
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -19,10 +18,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import KBinsDiscretizer, OrdinalEncoder
 from sklearn.inspection import permutation_importance
-from sklearn.neural_network import MLPClassifier
 
 # scipy ships with scikit-learn, so these are always available.
-from scipy.stats import spearmanr, kendalltau, wilcoxon
+from scipy.stats import spearmanr, kendalltau
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +43,6 @@ METHOD_COLORS = {
     "shap":        COLOR_SCHEME[1],
     "permutation": COLOR_SCHEME[2],
     "lime":        COLOR_SCHEME[3],
-    "integrated_gradients": COLOR_SCHEME[4],
-    "mdi":         COLOR_SCHEME[5],
 }
 
 
@@ -75,12 +71,21 @@ def set_all_seeds(seed: int) -> None:
 
 
 def set_plot_style() -> None:
-    """A clean, paper-friendly matplotlib style (colour-blind safe, legible)."""
+    """A clean, paper-friendly matplotlib style (colour-blind safe, legible).
+
+    Typography mimics a LaTeX-typeset paper: a serif face for all text and the
+    "cm" mathtext fontset for any embedded math, both bundled with matplotlib
+    (no system TeX install required, so this is portable everywhere).
+    """
     plt.rcParams.update({
         "figure.dpi": 120,
         "savefig.dpi": 200,
+        "font.family": "serif",
+        "font.serif": ["STIXGeneral", "cmr10", "DejaVu Serif"],
+        "mathtext.fontset": "cm",
+        "axes.formatter.use_mathtext": True,
         "font.size": 11,
-        "axes.titlesize": 13,
+        "axes.titlesize": 14,
         "axes.titleweight": "bold",
         "axes.labelsize": 12,
         "axes.spines.top": False,
@@ -532,19 +537,10 @@ def train_tree(dataset: str, bins: int, strategy: str = "uniform", seed: int = 4
 #
 # Every method returns a non-negative importance vector aligned with
 # ``bundle.features``.  We deliberately include a diverse set:
-#   * usefulness            - our logic-based score (exact, on the tree itself);
-#   * mdi                   - Gini / Mean Decrease in Impurity (free, tree-native);
-#   * permutation           - model-agnostic, measured on held-out data;
-#   * shap                  - TreeSHAP, the baseline already used in the paper;
-#   * lime                  - local surrogates, aggregated to a global score;
-#   * integrated_gradients  - needs a *differentiable* model, so it is computed on
-#                             an MLP surrogate (a discussion point in itself: the
-#                             usefulness score needs no surrogate).
-
-
-def importance_mdi(bundle: ModelBundle) -> np.ndarray:
-    """Mean Decrease in Impurity (a.k.a. Gini importance), native to the tree."""
-    return np.asarray(bundle.clf.feature_importances_, dtype=float)
+#   * usefulness  - our logic-based score (exact, on the tree itself);
+#   * permutation - model-agnostic, measured on held-out data;
+#   * shap        - TreeSHAP, the baseline already used in the paper;
+#   * lime        - local surrogates, aggregated to a global score.
 
 
 def importance_permutation(bundle: ModelBundle, n_repeats: int = 10, seed: int = 42) -> np.ndarray:
@@ -600,90 +596,36 @@ def importance_lime(bundle: ModelBundle, sample: int = 100, seed: int = 42) -> n
     return agg / len(idx)
 
 
-def importance_integrated_gradients(bundle: ModelBundle, sample: int = 100, steps: int = 32,
-                                    seed: int = 42, hidden=(64,), baseline: str = "median"
-                                    ) -> Tuple[np.ndarray, float]:
-    """Integrated Gradients on a differentiable MLP *surrogate* of the tree.
-
-    Integrated Gradients requires a differentiable model, which a decision tree
-    is not.  We therefore train a small MLP surrogate on the same binned data and
-    integrate its gradients along the straight-line path from a baseline to each
-    input, using the midpoint (Riemann) rule and central finite differences.
-    (Swap in captum + a torch model here if a GPU/torch backend is available.)
-
-    Returns ``(importance_vector, surrogate_test_accuracy)``.
-    """
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import StandardScaler
-
-    surrogate = make_pipeline(StandardScaler(),
-                              MLPClassifier(hidden_layer_sizes=hidden, max_iter=400,
-                                            random_state=seed))
-    surrogate.fit(bundle.X_train, bundle.y_train)
-    surr_acc = float((surrogate.predict(bundle.X_test) == bundle.y_test).mean())
-
-    Xtr = bundle.X_train.to_numpy(dtype=float)
-    d = Xtr.shape[1]
-    base = np.median(Xtr, axis=0) if baseline == "median" else np.zeros(d)
-    pos = list(surrogate.classes_).index(surrogate.classes_[-1])
-    F = lambda M: surrogate.predict_proba(M)[:, pos]      # scalar output to attribute
-
-    rng = np.random.RandomState(seed)
-    idx = rng.choice(len(Xtr), size=min(sample, len(Xtr)), replace=False)
-    alphas = (np.arange(1, steps + 1) - 0.5) / steps      # midpoint rule
-    h = 1e-2
-
-    ig = np.zeros(d)
-    for i in idx:
-        x = Xtr[i]
-        diff = x - base
-        path = base[None, :] + alphas[:, None] * diff[None, :]   # (steps, d)
-        grad = np.zeros((steps, d))
-        for j in range(d):
-            Xp = path.copy(); Xp[:, j] += h
-            Xm = path.copy(); Xm[:, j] -= h
-            grad[:, j] = (F(Xp) - F(Xm)) / (2 * h)               # central difference
-        ig += np.abs(diff * grad.mean(axis=0))                   # |IG_i| for this row
-    return ig / len(idx), surr_acc
-
-
 # Registry of every importance method (name -> callable(bundle, cfg)).
 def compute_all_importances(bundle: ModelBundle, cfg: Config,
-                            methods: Sequence[str] = ("usefulness", "mdi", "permutation",
-                                                      "shap", "lime", "integrated_gradients"),
-                            ) -> Tuple[Dict[str, np.ndarray], Dict[str, float], Dict[str, float]]:
+                            methods: Sequence[str] = ("usefulness", "permutation",
+                                                      "shap", "lime"),
+                            ) -> Tuple[Dict[str, np.ndarray], Dict[str, float]]:
     """Compute the requested importance vectors, timing each one.
 
-    Returns ``(importances, timings_seconds, extras)``.  Methods whose optional
+    Returns ``(importances, timings_seconds)``.  Methods whose optional
     dependency is missing are skipped with a warning rather than crashing.
     """
     importances: Dict[str, np.ndarray] = {}
     timings: Dict[str, float] = {}
-    extras: Dict[str, float] = {}
 
     for m in methods:
         t0 = time.perf_counter()
         try:
             if m == "usefulness":
                 importances[m] = usefulness_scores(bundle.clf, bundle.domains, bundle.features)
-            elif m == "mdi":
-                importances[m] = importance_mdi(bundle)
             elif m == "permutation":
                 importances[m] = importance_permutation(bundle, seed=cfg.seed)
             elif m == "shap":
                 importances[m] = importance_shap(bundle, sample=cfg.importance_sample, seed=cfg.seed)
             elif m == "lime":
                 importances[m] = importance_lime(bundle, sample=min(cfg.importance_sample, 100), seed=cfg.seed)
-            elif m == "integrated_gradients":
-                ig, acc = importance_integrated_gradients(bundle, sample=min(cfg.importance_sample, 100), seed=cfg.seed)
-                importances[m] = ig
-                extras["ig_surrogate_acc"] = acc
             else:
                 raise ValueError(f"Unknown importance method {m!r}")
             timings[m] = time.perf_counter() - t0
         except Exception as exc:                      # optional dep missing / method failed
             warnings.warn(f"Importance method {m!r} skipped: {exc!r}")
-    return importances, timings, extras
+    return importances, timings
 
 
 def normalize_importance(v: np.ndarray, how: str = "sum") -> np.ndarray:
@@ -699,32 +641,14 @@ def normalize_importance(v: np.ndarray, how: str = "sum") -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# 4.  Comparing rankings: correlations, top-k overlap, ground-truth agreement
+# 4.  Comparing rankings: correlations and top-k overlap
 # ---------------------------------------------------------------------------
 #
 # Because the methods live on different scales, we compare the *rankings*
-# they induce, not the raw numbers.  Three complementary views:
+# they induce, not the raw numbers.  Two complementary views:
 #   * rank correlation (Spearman / Kendall) between every pair of methods;
 #   * top-k overlap of each method with the usefulness score -- this is exactly
-#     the metric of Table 1 in the paper, here extended to every method;
-#   * agreement with the domain "ground-truth" ranking stated in the paper.
-
-GROUND_TRUTH: Dict[str, Dict[str, int]] = {
-    "california": {"MedInc": 4, "Longitude": 3, "Latitude": 3,
-                   "HouseAge": 2, "Population": 1, "AveBedrms": 1},
-    "bike_sharing": {"hr": 4, "temp": 3, "hum": 3, "weekday": 1, "holiday": 1},
-    "adult_income": {"education-num": 3, "capital-gain": 3, "relationship": 3,
-                     "fnlwgt": 1, "race": 1, "education": 1},
-}
-
-
-def _resolve(name: str, features: Sequence[str]) -> Optional[str]:
-    """Map a logical ground-truth name to the actual column in ``features``."""
-    if name in features:
-        return name
-    if name + "_binned" in features:
-        return name + "_binned"
-    return None
+#     the metric of Table 1 in the paper, here extended to every method.
 
 
 def ranking_from_importance(imp: np.ndarray, features: Sequence[str]) -> List[str]:
@@ -758,47 +682,15 @@ def topk_intersection_vs(importances: Dict[str, np.ndarray], features: Sequence[
     return pd.DataFrame(rows).T
 
 
-def ground_truth_agreement(importances: Dict[str, np.ndarray], dataset: str,
-                           features: Sequence[str]) -> pd.DataFrame:
-    """How well each method matches the paper's stated ground-truth ranking.
-
-    Reports, per method:
-      * ``spearman_gt`` - Spearman correlation with the ground-truth tiers,
-        computed over the annotated features only;
-      * ``top1_hit``    - 1 if the ground-truth #1 feature is the method's #1;
-      * ``top3_recall`` - fraction of the top ground-truth tier found in the
-        method's global top-3.
-    """
-    gt = GROUND_TRUTH[dataset]
-    # Resolve names and keep only those present in this model.
-    resolved = {(_resolve(k, features)): v for k, v in gt.items() if _resolve(k, features)}
-    gt_feats = list(resolved)
-    gt_scores = np.array([resolved[f] for f in gt_feats], dtype=float)
-    top_gt_value = max(resolved.values())
-    top_gt_feats = {f for f, v in resolved.items() if v == top_gt_value}
-
-    rows = {}
-    for name, imp in importances.items():
-        imp = np.asarray(imp, dtype=float)
-        sub = np.array([imp[list(features).index(f)] for f in gt_feats])
-        rho = spearmanr(sub, gt_scores).correlation if len(gt_feats) > 2 else np.nan
-        rank = ranking_from_importance(imp, features)
-        top1_hit = int(rank[0] in top_gt_feats)
-        top3_recall = len(set(rank[:3]) & top_gt_feats) / len(top_gt_feats)
-        rows[name] = {"spearman_gt": rho, "top1_hit": top1_hit, "top3_recall": top3_recall}
-    return pd.DataFrame(rows).T
-
-
 # ---------------------------------------------------------------------------
-# 5.  Runtime and memory analysis
+# 5.  Runtime analysis
 # ---------------------------------------------------------------------------
 #
 # We measure wall-clock time with ``time.perf_counter`` (best-of-``repeat`` to
-# damp noise) and *peak* Python allocation with ``tracemalloc`` -- both from the
-# standard library, so the measurement itself adds no dependency and is fully
-# reproducible.  The two natural "size" axes for the usefulness algorithm are the
-# number of tree nodes and the per-feature domain size (number of bins), so those
-# are what we sweep and plot against.
+# damp noise), from the standard library, so the measurement itself adds no
+# dependency and is fully reproducible.  The two natural "size" axes for the
+# usefulness algorithm are the number of tree nodes and the per-feature domain
+# size (number of bins), so those are what we sweep and plot against.
 
 
 def entity_space_log10(domains: Dict[str, Tuple[float, float]]) -> float:
@@ -807,10 +699,9 @@ def entity_space_log10(domains: Dict[str, Tuple[float, float]]) -> float:
 
 
 def profile_usefulness(bundle: ModelBundle, repeat: int = 5) -> Dict[str, float]:
-    """Time and peak-memory of computing *all* usefulness scores for one model."""
+    """Time of computing *all* usefulness scores for one model (best of `repeat`)."""
     tree = dec_tree_to_my_tree(bundle.clf, bundle.domains, bundle.features)
 
-    # --- timing: best of `repeat` runs ---
     best = math.inf
     for _ in range(repeat):
         t0 = time.perf_counter()
@@ -818,21 +709,12 @@ def profile_usefulness(bundle: ModelBundle, repeat: int = 5) -> Dict[str, float]
             compute_score(tree, f, bundle.domains)
         best = min(best, time.perf_counter() - t0)
 
-    # --- peak memory of one full pass ---
-    tracemalloc.start()
-    tracemalloc.reset_peak()
-    for f in bundle.features:
-        compute_score(tree, f, bundle.domains)
-    _, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-
     return {
         "dataset": bundle.dataset, "bins": bundle.bins, "strategy": bundle.strategy,
         "n_features": len(bundle.features), "n_nodes": int(bundle.clf.tree_.node_count),
         "max_depth": int(bundle.clf.get_depth()), "accuracy": bundle.accuracy,
         "entity_space_log10": entity_space_log10(bundle.domains),
         "time_total_s": best, "time_per_feature_s": best / len(bundle.features),
-        "peak_mem_mb": peak / 1024 / 1024,
     }
 
 
@@ -869,8 +751,8 @@ def scaling_experiment(dataset: str, cfg: Config, strategy: str = "uniform",
 
 
 def method_runtime_comparison(bundle: ModelBundle, cfg: Config,
-                              methods: Sequence[str] = ("usefulness", "mdi", "permutation",
-                                                        "shap", "lime", "integrated_gradients"),
+                              methods: Sequence[str] = ("usefulness", "permutation",
+                                                        "shap", "lime"),
                               repeat: int = 3) -> pd.DataFrame:
     """Wall-clock cost of each importance method on the *same* trained model.
 
@@ -882,7 +764,7 @@ def method_runtime_comparison(bundle: ModelBundle, cfg: Config,
         best = math.inf
         ok = True
         for _ in range(repeat):
-            imp_one, timings, _ = compute_all_importances(bundle, cfg, methods=(m,))
+            imp_one, timings = compute_all_importances(bundle, cfg, methods=(m,))
             if m not in timings:                       # method skipped (missing dep)
                 ok = False
                 break
@@ -894,7 +776,7 @@ def method_runtime_comparison(bundle: ModelBundle, cfg: Config,
     return pd.DataFrame(rows)
 
 
-# --- (a) implementation speedup: copy-free scorer vs copy.deepcopy ----------
+# --- implementation speedup: copy-free scorer vs copy.deepcopy -------------
 def profile_scorer_speedup(bundle: ModelBundle, repeat: int = 3) -> Dict[str, float]:
     """Quantify how much of the usefulness runtime was ``copy.deepcopy`` overhead.
 
@@ -918,157 +800,15 @@ def profile_scorer_speedup(bundle: ModelBundle, repeat: int = 3) -> Dict[str, fl
             "deepcopy_s": slow, "clone_s": fast, "speedup": slow / fast}
 
 
-# --- (b) runtime as a function of the number of instances processed ---------
-def runtime_vs_dataset_size(bundle: ModelBundle, cfg: Config,
-                            sizes: Sequence[int] = (25, 50, 100, 200, 400, 800),
-                            methods: Sequence[str] = ("usefulness", "mdi", "permutation", "shap", "lime"),
-                            repeat: int = 1) -> pd.DataFrame:
-    """Wall-clock of each method vs the number of instances it must process.
-
-    The usefulness score reads only the tree + domains, so it is **data-free**:
-    its runtime is flat in the dataset size, while SHAP/permutation/LIME/IG grow.
-    """
-    rng = np.random.RandomState(cfg.seed)
-
-    def _run(m: str, n: int) -> None:
-        if m == "usefulness":
-            usefulness_scores(bundle.clf, bundle.domains, bundle.features)
-        elif m == "mdi":
-            importance_mdi(bundle)
-        elif m == "permutation":
-            k = min(n, len(bundle.X_test))
-            idx = rng.choice(len(bundle.X_test), k, replace=False)
-            permutation_importance(bundle.clf, bundle.X_test.iloc[idx], bundle.y_test[idx],
-                                   n_repeats=5, random_state=cfg.seed, scoring="accuracy")
-        elif m == "shap":
-            importance_shap(bundle, sample=n, seed=cfg.seed)
-        elif m == "lime":
-            importance_lime(bundle, sample=n, seed=cfg.seed)
-        elif m == "integrated_gradients":
-            importance_integrated_gradients(bundle, sample=n, seed=cfg.seed)
-
-    # Warm up each method once (untimed): some backends, e.g. SHAP's numba, pay a
-    # large one-time JIT cost on the first call that would otherwise pollute the
-    # smallest data point.
-    for m in methods:
-        try:
-            _run(m, min(sizes))
-        except Exception:
-            pass
-
-    rows = []
-    for n in sizes:
-        for m in methods:
-            best, ok = math.inf, True
-            for _ in range(repeat):
-                t0 = time.perf_counter()
-                try:
-                    _run(m, n)
-                except Exception as exc:
-                    warnings.warn(f"{m} skipped at n={n}: {exc!r}"); ok = False; break
-                best = min(best, time.perf_counter() - t0)
-            if ok:
-                rows.append({"method": m, "n_instances": n, "time_s": best})
-    return pd.DataFrame(rows)
-
-
-# --- (c) time to a stable ranking for the approximate methods ---------------
-# Per-method "budget" knob: sample size for the instance-based methods, number
-# of repeats for permutation.  usefulness/mdi are exact -> a single point.
-_BUDGET_GRID = {
-    "shap": (10, 25, 50, 100, 200, 400),
-    "lime": (10, 25, 50, 100, 200, 400),
-    "integrated_gradients": (10, 25, 50, 100, 200),
-    "permutation": (1, 2, 5, 10, 20, 50),
-}
-
-
-def _importance_with_budget(bundle: ModelBundle, method: str, budget: int, cfg: Config) -> np.ndarray:
-    if method == "shap":
-        return importance_shap(bundle, sample=budget, seed=cfg.seed)
-    if method == "lime":
-        return importance_lime(bundle, sample=budget, seed=cfg.seed)
-    if method == "integrated_gradients":
-        return importance_integrated_gradients(bundle, sample=budget, seed=cfg.seed)[0]
-    if method == "permutation":
-        return importance_permutation(bundle, n_repeats=budget, seed=cfg.seed)
-    raise ValueError(method)
-
-
-def time_to_stable_ranking(bundle: ModelBundle, cfg: Config,
-                           methods: Sequence[str] = ("shap", "permutation", "lime"),
-                           exact: Sequence[str] = ("usefulness", "mdi")) -> pd.DataFrame:
-    """How much wall-clock each approximate method needs before its ranking stops
-    changing, versus the exact methods (which are stable by construction).
-
-    For every method we sweep its budget, record runtime and the rank correlation
-    of that budget's ranking with the method's own largest-budget ("converged")
-    ranking.  Exact methods are added as single points at correlation 1.0.
-    """
-    rows = []
-    for m in methods:
-        grid = _BUDGET_GRID.get(m)
-        if grid is None:
-            continue
-        try:                                            # untimed warm-up (e.g. SHAP numba JIT)
-            _importance_with_budget(bundle, m, grid[0], cfg)
-        except Exception:
-            pass
-        imps, times = {}, {}
-        for budget in grid:
-            t0 = time.perf_counter()
-            try:
-                imps[budget] = _importance_with_budget(bundle, m, budget, cfg)
-            except Exception as exc:
-                warnings.warn(f"{m} skipped at budget={budget}: {exc!r}")
-                continue
-            times[budget] = time.perf_counter() - t0
-        if not imps:
-            continue
-        converged = imps[max(imps)]                     # ranking at the largest budget
-        for budget in sorted(imps):
-            rho = spearmanr(imps[budget], converged).correlation
-            rows.append({"method": m, "budget": budget, "time_s": times[budget],
-                         "spearman_to_converged": 1.0 if np.isnan(rho) else rho})
-
-    # exact methods: a single converged point at their measured cost
-    for m in exact:
-        t0 = time.perf_counter()
-        try:
-            usefulness_scores(bundle.clf, bundle.domains, bundle.features) if m == "usefulness" else importance_mdi(bundle)
-        except Exception:
-            continue
-        rows.append({"method": m, "budget": np.nan, "time_s": time.perf_counter() - t0,
-                     "spearman_to_converged": 1.0})
-    return pd.DataFrame(rows)
-
-
-# --- (d) quality vs cost, for the Pareto view -------------------------------
-def quality_cost_table(bundle: ModelBundle, cfg: Config,
-                       methods: Sequence[str] = ("usefulness", "mdi", "permutation",
-                                                 "shap", "lime", "integrated_gradients")
-                       ) -> pd.DataFrame:
-    """One row per method: its runtime and its agreement with the ground truth,
-    on a single model — the two axes of the quality/cost Pareto plot."""
-    imp, _, _ = compute_all_importances(bundle, cfg, methods=methods)      # quality
-    gt = ground_truth_agreement(imp, bundle.dataset, bundle.features)
-    rt = method_runtime_comparison(bundle, cfg, methods=methods, repeat=3)  # warm cost (min-of-3)
-    cost = dict(zip(rt["method"], rt["time_s"]))
-    return pd.DataFrame([{"method": m, "time_s": cost[m],
-                          "spearman_gt": float(gt.loc[m, "spearman_gt"])}
-                         for m in imp if m in cost])
-
-
 # ---------------------------------------------------------------------------
 # 6.  Binning-strategy sensitivity analysis
 # ---------------------------------------------------------------------------
 #
 # We re-run the usefulness experiment under ``uniform`` / ``quantile`` / ``kmeans``
-# discretization and ask three questions:
+# discretization and ask two questions:
 #   * does model accuracy depend on the strategy?
 #   * does the *ranking* the usefulness score induces depend on the strategy?
 #     (measured by cross-strategy Spearman correlation and top-3 overlap);
-#   * does agreement with the domain ground truth depend on the strategy?
 # This directly quantifies how much the paper's discretization choice matters.
 
 
@@ -1120,10 +860,8 @@ def run_binning_experiment(dataset: str, cfg: Config, n_models: Optional[int] = 
                 dataset, bins, strategy, n_models, seed, leaves=leaves_per_bin * bins)
             mean_imp[(strategy, bins)] = v
             features_ref = features
-            gt = ground_truth_agreement({"usefulness": v}, dataset, features).loc["usefulness"]
             summary_rows.append({"dataset": dataset, "strategy": strategy, "bins": bins,
-                                 "accuracy": acc, "spearman_gt": gt["spearman_gt"],
-                                 "top1_hit": gt["top1_hit"], "top3_recall": gt["top3_recall"]})
+                                 "accuracy": acc})
             for f, val in zip(features, v):
                 importance_rows.append({"strategy": strategy, "bins": bins,
                                         "feature": f.replace("_binned", ""), "importance": val})
@@ -1215,8 +953,8 @@ def _mean_of_frames(frames: List[pd.DataFrame]) -> pd.DataFrame:
 
 
 def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
-                              methods: Sequence[str] = ("usefulness", "mdi", "permutation",
-                                                        "shap", "lime", "integrated_gradients"),
+                              methods: Sequence[str] = ("usefulness", "permutation",
+                                                        "shap", "lime"),
                               n_models: Optional[int] = None, seed: Optional[int] = None
                               ) -> Dict[str, object]:
     """Compare the usefulness ranking with every method over ``n_models`` trees.
@@ -1224,11 +962,6 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
     Aggregates (like the paper's Table 1) across models and returns:
       * ``topk``          - mean top-k overlap of each method with usefulness;
       * ``corr_spearman`` - mean pairwise Spearman rank-correlation matrix;
-      * ``gt``            - mean ground-truth agreement per method;
-      * ``gt_ci``         - mean + 95% bootstrap CI of the ground-truth Spearman,
-                            across the ``n_models`` trees (for error bars);
-      * ``wilcoxon``      - paired Wilcoxon signed-rank test of usefulness vs SHAP
-                            on the per-model ground-truth agreement;
       * ``mean_importance`` - mean normalised importance per (feature, method);
       * ``features``      - feature order (by mean usefulness), for plotting.
     """
@@ -1237,8 +970,7 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
     leaves = cfg.leaves_per_bin[dataset] * bins
     rng = random.Random(seed)
 
-    topk_frames, corr_frames, gt_frames = [], [], []
-    gt_per_model: Dict[str, List[float]] = {}          # per-model spearman_gt, for CIs / tests
+    topk_frames, corr_frames = [], []
     imp_accum: Dict[str, np.ndarray] = {}
     features: List[str] = []
 
@@ -1246,15 +978,12 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
         s = rng.randint(0, 100_000)
         b = train_tree(dataset, bins=bins, strategy="uniform", seed=s, leaves=leaves)
         features = b.features
-        imp, _, _ = compute_all_importances(b, cfg, methods=methods)
+        imp, _ = compute_all_importances(b, cfg, methods=methods)
         present = [m for m in methods if m in imp]
 
         topk_frames.append(topk_intersection_vs(imp, features).loc[present])
         corr_frames.append(rank_correlation_matrix({m: imp[m] for m in present}))
-        gt_df = ground_truth_agreement(imp, dataset, features).loc[present]
-        gt_frames.append(gt_df)
         for m in present:
-            gt_per_model.setdefault(m, []).append(float(gt_df.loc[m, "spearman_gt"]))
             nv = normalize_importance(imp[m])
             imp_accum[m] = nv if m not in imp_accum else imp_accum[m] + nv
 
@@ -1262,52 +991,13 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
         {m: imp_accum[m] / n_models for m in imp_accum},
         index=[f.replace("_binned", "") for f in features])
 
-    # 95% bootstrap CI of the ground-truth agreement per method
-    gt_ci = pd.DataFrame({m: dict(zip(["mean", "ci_lo", "ci_hi"], _bootstrap_ci(v, seed=seed)))
-                          for m, v in gt_per_model.items()}).T
-    # paired test: is usefulness's agreement different from SHAP's across models?
-    wilcox = {}
-    if "usefulness" in gt_per_model and "shap" in gt_per_model:
-        wilcox["usefulness_vs_shap"] = _paired_wilcoxon(gt_per_model["usefulness"], gt_per_model["shap"])
-
     return {
         "dataset": dataset, "bins": bins, "n_models": n_models,
         "topk": _mean_of_frames(topk_frames),
         "corr_spearman": _mean_of_frames(corr_frames),
-        "gt": _mean_of_frames(gt_frames),
-        "gt_ci": gt_ci, "gt_per_model": gt_per_model, "wilcoxon": wilcox,
         "mean_importance": mean_importance,
         "features": [f.replace("_binned", "") for f in features],
     }
-
-
-def _bootstrap_ci(values: Sequence[float], n_boot: int = 2000, seed: int = 0,
-                  alpha: float = 0.05) -> Tuple[float, float, float]:
-    """Mean and percentile bootstrap (1-alpha) CI of a small sample (drops NaNs)."""
-    v = np.asarray(values, dtype=float)
-    v = v[~np.isnan(v)]
-    if len(v) == 0:
-        return (float("nan"), float("nan"), float("nan"))
-    if len(v) == 1:
-        return (float(v[0]), float(v[0]), float(v[0]))
-    rng = np.random.RandomState(seed)
-    boot = np.array([rng.choice(v, size=len(v), replace=True).mean() for _ in range(n_boot)])
-    return float(v.mean()), float(np.percentile(boot, 100 * alpha / 2)), float(np.percentile(boot, 100 * (1 - alpha / 2)))
-
-
-def _paired_wilcoxon(a: Sequence[float], b: Sequence[float]) -> Dict[str, object]:
-    """Paired Wilcoxon signed-rank test, robust to all-equal / degenerate inputs."""
-    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    mask = ~(np.isnan(a) | np.isnan(b))
-    a, b = a[mask], b[mask]
-    if len(a) < 1 or np.allclose(a, b):
-        return {"stat": float("nan"), "p": 1.0, "n": int(len(a)),
-                "note": "rankings identical across models -> no detectable difference"}
-    try:
-        res = wilcoxon(a, b)
-        return {"stat": float(res.statistic), "p": float(res.pvalue), "n": int(len(a))}
-    except Exception as exc:                            # e.g. zero_method edge cases
-        return {"stat": float("nan"), "p": float("nan"), "n": int(len(a)), "note": repr(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -1376,54 +1066,24 @@ def plot_topk_intersection(comparison: Dict[str, object], path_no_ext: str) -> N
     _save(fig, path_no_ext)
 
 
-def plot_ground_truth_agreement(comparison: Dict[str, object], path_no_ext: str) -> None:
-    """Spearman correlation of each method with the paper's ground-truth ranking.
-
-    If the comparison carries a bootstrap CI (``gt_ci``), 95% error bars are drawn.
-    """
-    gt = comparison["gt"].sort_values("spearman_gt", ascending=False)
-    methods = list(gt.index)
-    ci = comparison.get("gt_ci")
-    fig, ax = plt.subplots(figsize=(1.3 * len(methods) + 2, 4.5))
-    colors = [METHOD_COLORS.get(m, COLOR_SCHEME[7]) for m in methods]
-    heights = gt["spearman_gt"].values
-    yerr = None
-    if ci is not None:                                 # asymmetric 95% bootstrap CI
-        lo = [heights[i] - ci.loc[m, "ci_lo"] for i, m in enumerate(methods)]
-        hi = [ci.loc[m, "ci_hi"] - heights[i] for i, m in enumerate(methods)]
-        yerr = np.clip(np.array([lo, hi]), 0, None)
-    ax.bar(methods, heights, yerr=yerr, capsize=4, color=colors, edgecolor="black", linewidth=0.6,
-           error_kw={"ecolor": "#333", "elinewidth": 1})
-    top = heights + (yerr[1] if yerr is not None else 0)
-    for i, m in enumerate(methods):                    # annotate top-1 hit rate above bars
-        ax.text(i, top[i], f"top1={gt['top1_hit'].values[i]:.0%}",
-                ha="center", va="bottom", fontsize=8)
-    ax.axhline(0, color="grey", linewidth=0.8)
-    ax.set_ylabel("Spearman ρ vs ground truth")
-    ax.set_title(f"Agreement with domain ground truth — {comparison['dataset']}")
-    ax.set_xticklabels(methods, rotation=20, ha="right")
-    _save(fig, path_no_ext)
-
-
 def plot_scaling(scaling_df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
-    """Runtime and peak memory vs #bins and vs #tree-nodes.
+    """Runtime vs #bins and vs #tree-nodes.
 
-    A 2x2 grid with a single measure per axis (no dual-axis charts): the top row
-    is wall-clock time, the bottom row is peak memory; the left column varies the
-    number of bins, the right column varies the tree size.
+    A single row: the left panel varies the number of bins, the right panel
+    varies the tree size.
     """
     bins_df = scaling_df[scaling_df["sweep"] == "bins"].sort_values("bins")
     leaf_df = scaling_df[scaling_df["sweep"] == "leaves"].sort_values("n_nodes")
-    fig, axs = plt.subplots(2, 2, figsize=(13, 9))
+    fig, axs = plt.subplots(1, 2, figsize=(13, 4.8))
 
-    # top-left: time vs bins
-    ax = axs[0, 0]
+    # left: time vs bins
+    ax = axs[0]
     ax.plot(bins_df["bins"], bins_df["time_total_s"], "o-", color=COLOR_SCHEME[0])
     ax.set_yscale("log"); ax.set_xlabel("number of bins")
     ax.set_ylabel("time, all features (s)"); ax.set_title("Time vs #bins")
 
-    # top-right: time vs nodes, with an empirical power-law fit (theory check)
-    ax = axs[0, 1]
+    # right: time vs nodes, with an empirical power-law fit (theory check)
+    ax = axs[1]
     ax.plot(leaf_df["n_nodes"], leaf_df["time_total_s"], "o-", color=COLOR_SCHEME[0], label="measured")
     x = leaf_df["n_nodes"].to_numpy(float)
     y = leaf_df["time_total_s"].to_numpy(float)
@@ -1436,330 +1096,8 @@ def plot_scaling(scaling_df: pd.DataFrame, dataset: str, path_no_ext: str) -> No
     ax.set_yscale("log"); ax.set_xscale("log"); ax.set_xlabel("number of tree nodes")
     ax.set_ylabel("time, all features (s)"); ax.set_title("Time vs tree size")
 
-    # bottom-left: memory vs bins
-    ax = axs[1, 0]
-    ax.plot(bins_df["bins"], bins_df["peak_mem_mb"], "s-", color=COLOR_SCHEME[1])
-    ax.set_xlabel("number of bins"); ax.set_ylabel("peak memory (MB)"); ax.set_title("Memory vs #bins")
-
-    # bottom-right: memory vs nodes
-    ax = axs[1, 1]
-    ax.plot(leaf_df["n_nodes"], leaf_df["peak_mem_mb"], "s-", color=COLOR_SCHEME[1])
-    ax.set_xscale("log"); ax.set_xlabel("number of tree nodes")
-    ax.set_ylabel("peak memory (MB)"); ax.set_title("Memory vs tree size")
-
     fig.suptitle(f"Usefulness-score scaling — {dataset}", fontweight="bold")
     fig.tight_layout()
-    _save(fig, path_no_ext)
-
-
-# ---------------------------------------------------------------------------
-# 7d.  Synthetic controlled-feature experiment
-# ---------------------------------------------------------------------------
-#
-# We generate categorical datasets with a *known* target function, so the true
-# per-feature relevance is not folklore but something we can compute exactly with
-# our own score: we build the decision tree that represents the target and run
-# `compute_score` on it.  Three groups of features are planted:
-#   * relevant  - appear in the target function;
-#   * redundant - a copy of a relevant feature (correlated in the data), absent
-#                 from the target itself;
-#   * noise     - independent of the target (true usefulness exactly 0).
-#
-# Two structures are used.  "or_and" -> y = (x0 AND x1) OR x2, which has a graded
-# known order (x2 > x0 = x1 > redundant = noise); "mux" -> y = x0 if x2=0 else x1
-# (a multiplexer), used with a skewed selector to show that the *distribution-free*
-# usefulness score surfaces a feature governing a rare operating mode that the
-# data-weighted mean|SHAP| under-reports.
-
-# Sentinel leaves reused when hand-building the exact target trees.
-def _leaf(v):
-    return Node("True", 1, None, None) if v else Node("False", 0, None, None)
-
-
-def _true_target_tree(structure: str, domains: Dict[str, Tuple[float, float]]) -> Tree:
-    """The decision tree that represents the synthetic target exactly.
-
-    Only x0/x1/x2 are tested; every other feature (redundant, noise) is absent,
-    so its usefulness is exactly 0 by construction.
-    """
-    if structure == "or_and":                       # y = (x0 AND x1) OR x2
-        x1n = Node("x1", 0.5, _leaf(False), _leaf(True))     # x2=0, x0=1: y = x1
-        x0n = Node("x0", 0.5, _leaf(False), x1n)             # x2=0: y = x0 AND x1
-        root = Node("x2", 0.5, x0n, _leaf(True))             # x2=1: y = 1
-    elif structure == "mux":                         # y = x0 if x2=0 else x1
-        left = Node("x0", 0.5, _leaf(False), _leaf(True))    # x2=0: y = x0
-        right = Node("x1", 0.5, _leaf(False), _leaf(True))   # x2=1: y = x1
-        root = Node("x2", 0.5, left, right)
-    else:
-        raise ValueError(structure)
-    return Tree(root, domains)
-
-
-def true_usefulness(structure: str, features: Sequence[str],
-                    domains: Dict[str, Tuple[float, float]]) -> Dict[str, float]:
-    """Exact usefulness of every feature for the *true* target function."""
-    tree = _true_target_tree(structure, domains)
-    return {f: compute_score(tree, f, domains) for f in features}
-
-
-def make_synthetic_dataset(n_samples: int = 8000, n_noise: int = 6, structure: str = "or_and",
-                           redundant: bool = True, skew: Optional[float] = None, seed: int = 42
-                           ) -> Tuple[pd.DataFrame, np.ndarray, Dict[str, object]]:
-    """Generate a binary categorical dataset with a known target.
-
-    ``skew`` (if given) is the probability that the selector/third feature ``x2``
-    equals 1; a small value makes the ``x2=1`` branch rare in the data (used by
-    the "mux" rare-mode demonstration). ``redundant`` adds ``x0_copy = x0``.
-    """
-    rng = np.random.RandomState(seed)
-    x0 = rng.randint(0, 2, n_samples)
-    x1 = rng.randint(0, 2, n_samples)
-    x2 = (rng.rand(n_samples) < skew).astype(int) if skew is not None else rng.randint(0, 2, n_samples)
-
-    if structure == "or_and":
-        y = ((x0 & x1) | x2).astype(int)
-    elif structure == "mux":
-        y = np.where(x2 == 1, x1, x0).astype(int)
-    else:
-        raise ValueError(structure)
-
-    cols = {"x0": x0, "x1": x1, "x2": x2}
-    redundant_feats = []
-    if redundant:
-        cols["x0_copy"] = x0.copy()                  # exact copy -> correlated, but not in the target
-        redundant_feats = ["x0_copy"]
-    noise_feats = [f"noise{i}" for i in range(n_noise)]
-    for f in noise_feats:
-        cols[f] = rng.randint(0, 2, n_samples)
-
-    X = pd.DataFrame(cols)
-    info = {"relevant": ["x0", "x1", "x2"], "redundant": redundant_feats,
-            "noise": noise_feats, "structure": structure}
-    return X, y.astype(int), info
-
-
-def synthetic_bundle(X: pd.DataFrame, y: np.ndarray, seed: int = 42,
-                     max_leaf_nodes: int = 128, min_samples_leaf: int = 20) -> ModelBundle:
-    """Train a tree on a synthetic dataset and wrap it as a :class:`ModelBundle`.
-
-    ``min_samples_leaf`` regularises the tree so it does not split on noise.
-    """
-    features = list(X.columns)
-    domains = {f: (0, 1) for f in features}
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=seed)
-    clf = DecisionTreeClassifier(random_state=seed, max_leaf_nodes=max_leaf_nodes,
-                                 min_samples_leaf=min_samples_leaf)
-    clf.fit(X_train, y_train)
-    acc = float((clf.predict(X_test) == y_test).mean())
-    return ModelBundle("synthetic", clf, acc, domains, features,
-                       X_train.reset_index(drop=True), np.asarray(y_train),
-                       X_test.reset_index(drop=True), np.asarray(y_test), 2, "none")
-
-
-def _useful_fraction(scores: Dict[str, float], domains: Dict[str, Tuple[float, float]]) -> Dict[str, float]:
-    """Express scores as the fraction of the input space where the feature is useful."""
-    total = 1
-    for a, b in domains.values():
-        total *= (math.floor(b) - math.ceil(a) + 1)
-    return {f: s / total for f, s in scores.items()}
-
-
-def _synthetic_recovery_case(cfg: Config, seed: int, n_noise: int, redundant: bool,
-                             methods: Sequence[str]) -> Dict[str, object]:
-    """Train on one 'or_and' dataset and gather per-feature scores + recovery stats."""
-    from sklearn.metrics import roc_auc_score
-    X, y, info = make_synthetic_dataset(n_samples=8000, n_noise=n_noise,
-                                        structure="or_and", redundant=redundant, seed=seed)
-    bundle = synthetic_bundle(X, y, seed=seed)
-    imp, _, _ = compute_all_importances(bundle, cfg, methods=methods)
-    features = bundle.features
-    true_u = true_usefulness("or_and", features, bundle.domains)
-    emp_u = dict(zip(features, imp["usefulness"]))
-
-    # per-method AUC separating relevant (1) from noise (0); the redundant copy is excluded
-    labelled = [f for f in features if f in info["relevant"] or f in info["noise"]]
-    labels = np.array([1 if f in info["relevant"] else 0 for f in labelled])
-    auc_rows = {}
-    for m, vec in imp.items():
-        vals = np.array([vec[features.index(f)] for f in labelled])
-        auc = roc_auc_score(labels, vals) if len(set(labels)) == 2 else np.nan
-        auc_rows[m] = {"auc_relevant_vs_noise": auc,
-                       "mean_noise": float(np.mean([vec[features.index(f)] for f in info["noise"]])),
-                       "mean_relevant": float(np.mean([vec[features.index(f)] for f in info["relevant"]]))}
-    rho = spearmanr([emp_u[f] for f in features], [true_u[f] for f in features]).correlation
-
-    return {"bundle": bundle, "info": info, "importances": imp,
-            "true_fraction": _useful_fraction(true_u, bundle.domains),
-            "empirical_fraction": _useful_fraction(emp_u, bundle.domains),
-            "auc": pd.DataFrame(auc_rows).T, "spearman_true_vs_empirical": float(rho),
-            "accuracy": bundle.accuracy}
-
-
-def run_synthetic_experiment(cfg: Config, seed: int = 42, n_noise: int = 6,
-                             methods: Sequence[str] = ("usefulness", "mdi", "permutation",
-                                                       "shap", "lime")) -> Dict[str, object]:
-    """Controlled recovery on ``y = (x0 AND x1) OR x2``.
-
-    Runs two cases: a *clean* one (no redundant feature) for the headline recovery
-    numbers, and one *with* a redundant copy of ``x0`` to show that usefulness is
-    a property of the model (the copy absorbs x0's mass when the tree uses it,
-    and the total is conserved).
-    """
-    clean = _synthetic_recovery_case(cfg, seed, n_noise, redundant=False, methods=methods)
-    redundant = _synthetic_recovery_case(cfg, seed, n_noise, redundant=True, methods=methods)
-    rf, tf = redundant["empirical_fraction"], redundant["true_fraction"]
-    redundant["redundancy"] = {"x0": rf["x0"], "x0_copy": rf["x0_copy"],
-                               "sum": rf["x0"] + rf["x0_copy"], "true_x0": tf["x0"]}
-    return {"clean": clean, "redundant": redundant}
-
-
-def run_rare_relevance_experiment(cfg: Config, seed: int = 42, n_noise: int = 4,
-                                  skew: float = 0.12) -> Dict[str, object]:
-    """Mux config with a rare selector: usefulness (distribution-free) keeps the
-    rare-mode feature x1 on par with x0, whereas mean|SHAP| (data-weighted) drops
-    it toward the noise level.
-    """
-    X, y, info = make_synthetic_dataset(n_samples=12000, n_noise=n_noise,
-                                        structure="mux", redundant=False, skew=skew, seed=seed)
-    bundle = synthetic_bundle(X, y, seed=seed)
-    imp, _, _ = compute_all_importances(bundle, cfg, methods=("usefulness", "shap"))
-    features = bundle.features
-    use_n = normalize_importance(imp["usefulness"], how="max")     # max-normalise for comparison
-    shap_n = normalize_importance(imp["shap"], how="max")
-    rows = []
-    for i, f in enumerate(features):
-        group = ("relevant" if f in info["relevant"] else
-                 "noise" if f in info["noise"] else "redundant")
-        rows.append({"feature": f, "group": group,
-                     "usefulness": use_n[i], "shap": shap_n[i]})
-    return {"bundle": bundle, "info": info, "skew": skew,
-            "table": pd.DataFrame(rows), "importances": imp}
-
-
-def runtime_vs_n_features(cfg: Config, n_features_list: Sequence[int] = (5, 10, 20, 40, 80),
-                          n_samples: int = 6000, seed: int = 42, repeat: int = 3) -> pd.DataFrame:
-    """Runtime and peak memory of scoring *all* features as the feature count grows.
-
-    Uses the synthetic generator (3 relevant features + the rest noise) so the tree
-    stays small: this isolates the dependence on the number of features |X|, which
-    is exactly reviewer question 2.f-(i).
-    """
-    rows = []
-    for n in n_features_list:
-        X, y, _ = make_synthetic_dataset(n_samples=n_samples, n_noise=max(0, n - 3),
-                                         structure="or_and", redundant=False, seed=seed)
-        b = synthetic_bundle(X, y, seed=seed)
-        tree = dec_tree_to_my_tree(b.clf, b.domains, b.features)
-        best = math.inf
-        for _ in range(repeat):
-            t0 = time.perf_counter()
-            for f in b.features:
-                compute_score(tree, f, b.domains)
-            best = min(best, time.perf_counter() - t0)
-        tracemalloc.start(); tracemalloc.reset_peak()
-        for f in b.features:
-            compute_score(tree, f, b.domains)
-        _, peak = tracemalloc.get_traced_memory(); tracemalloc.stop()
-        rows.append({"n_features": len(b.features), "n_nodes": int(b.clf.tree_.node_count),
-                     "time_s": best, "peak_mem_mb": peak / 1024 / 1024})
-    return pd.DataFrame(rows)
-
-
-_SYNTH_GROUP_COLOR = {"relevant": COLOR_SCHEME[0], "redundant": COLOR_SCHEME[1], "noise": "#9aa0a6"}
-
-
-def _synth_bars(ax, emp, true, info) -> None:
-    """Draw empirical-usefulness bars (coloured by planted group) with true markers."""
-    group_of = {**{f: "relevant" for f in info["relevant"]},
-                **{f: "redundant" for f in info["redundant"]},
-                **{f: "noise" for f in info["noise"]}}
-    feats = sorted(emp, key=lambda f: -true[f])       # order by true usefulness
-    x = np.arange(len(feats))
-    ax.bar(x, [emp[f] for f in feats],
-           color=[_SYNTH_GROUP_COLOR[group_of[f]] for f in feats], edgecolor="black", linewidth=0.5)
-    ax.plot(x, [true[f] for f in feats], "D", color="black", ms=7, zorder=5)
-    ax.set_xticks(x); ax.set_xticklabels(feats, rotation=30, ha="right")
-
-
-def plot_synthetic_recovery(result: Dict[str, object], path_no_ext: str) -> None:
-    """Two panels on ``y = (x0 AND x1) OR x2``: (left) clean recovery — empirical
-    usefulness matches the exact/true value and noise sits at 0; (right) with a
-    redundant copy of x0, the copy absorbs x0's mass (the model uses it instead),
-    while the total relevance is conserved."""
-    from matplotlib.lines import Line2D
-    from matplotlib.patches import Patch
-    clean, redundant = result["clean"], result["redundant"]
-    fig, axs = plt.subplots(1, 2, figsize=(13, 4.8), gridspec_kw={"width_ratios": [3, 2]})
-
-    _synth_bars(axs[0], clean["empirical_fraction"], clean["true_fraction"], clean["info"])
-    axs[0].set_ylabel("fraction of inputs where feature is useful")
-    axs[0].set_title("Clean recovery (no redundant feature)")
-
-    _synth_bars(axs[1], redundant["empirical_fraction"], redundant["true_fraction"], redundant["info"])
-    r = redundant["redundancy"]
-    axs[1].set_title(f"Redundancy: x0 + x0_copy = {r['sum']:.2f} (true x0 = {r['true_x0']:.2f})")
-
-    handles = [Patch(facecolor=_SYNTH_GROUP_COLOR[g], edgecolor="black", label=g)
-               for g in ["relevant", "redundant", "noise"]]
-    handles.append(Line2D([0], [0], marker="D", color="black", ls="", label="true usefulness"))
-    axs[1].legend(handles=handles, fontsize=9)
-    fig.suptitle(r"Synthetic controlled-feature experiment: $y = (x_0 \wedge x_1) \vee x_2$",
-                 fontweight="bold")
-    fig.tight_layout()
-    _save(fig, path_no_ext)
-
-
-def plot_synthetic_recovery_auc(auc_df: pd.DataFrame, path_no_ext: str) -> None:
-    """Per-method AUC separating the planted relevant features from the noise ones."""
-    d = auc_df.sort_values("auc_relevant_vs_noise", ascending=False)
-    methods = list(d.index)
-    colors = [METHOD_COLORS.get(m, COLOR_SCHEME[7]) for m in methods]
-    fig, ax = plt.subplots(figsize=(1.3 * len(methods) + 2, 4.5))
-    ax.bar(methods, d["auc_relevant_vs_noise"], color=colors, edgecolor="black", linewidth=0.6)
-    ax.axhline(1.0, color="grey", ls=":", lw=1)
-    ax.set_ylim(0, 1.08); ax.set_ylabel("AUC (relevant vs noise)")
-    ax.set_title("Recovery of the planted relevant features")
-    for i, v in enumerate(d["auc_relevant_vs_noise"]):
-        ax.text(i, v, f"{v:.2f}", ha="center", va="bottom", fontsize=9)
-    ax.set_xticklabels(methods, rotation=20, ha="right")
-    _save(fig, path_no_ext)
-
-
-def plot_rare_relevance(result: Dict[str, object], path_no_ext: str) -> None:
-    """Usefulness vs mean|SHAP| for the multiplexer with a rare selector: x1 stays
-    high under usefulness (distribution-free) but drops under mean|SHAP|."""
-    d = result["table"]
-    order = ["x0", "x1", "x2"] + [f for f in d["feature"] if str(f).startswith("noise")]
-    d = d.set_index("feature").loc[order].reset_index()
-    x = np.arange(len(d)); w = 0.4
-    fig, ax = plt.subplots(figsize=(1.1 * len(d) + 2, 4.8))
-    ax.bar(x - w / 2, d["usefulness"], width=w, color=COLOR_SCHEME[0], edgecolor="black",
-           linewidth=0.5, label="usefulness (distribution-free)")
-    ax.bar(x + w / 2, d["shap"], width=w, color=COLOR_SCHEME[1], edgecolor="black",
-           linewidth=0.5, label="mean |SHAP| (data-weighted)")
-    ax.set_xticks(x); ax.set_xticklabels(d["feature"], rotation=30, ha="right")
-    ax.set_ylabel("importance (max-normalised)")
-    ax.set_title(f"Rare operating mode: selector $x_2{{=}}1$ in {result['skew']:.0%} of the data\n"
-                 r"$y = x_0$ if $x_2{=}0$ else $x_1$")
-    ax.legend()
-    _save(fig, path_no_ext)
-
-
-def plot_runtime_vs_n_features(df: pd.DataFrame, path_no_ext: str) -> None:
-    """Usefulness runtime vs the number of features, with a fitted power law."""
-    fig, ax = plt.subplots(figsize=(7, 4.8))
-    ax.plot(df["n_features"], df["time_s"], "o-", color=COLOR_SCHEME[0], label="measured")
-    x = df["n_features"].to_numpy(float)
-    y = df["time_s"].to_numpy(float)
-    if len(x) >= 2 and (x > 0).all() and (y > 0).all():
-        slope, intercept = np.polyfit(np.log(x), np.log(y), 1)
-        ax.plot(x, np.exp(intercept) * x ** slope, "--", color=COLOR_SCHEME[7],
-                label=fr"fit $\propto |X|^{{{slope:.2f}}}$")
-        ax.legend()
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("number of features |X|")
-    ax.set_ylabel("time to score all features (s)")
-    ax.set_title("Usefulness runtime vs number of features\n(3 relevant + noise; tree kept small)")
     _save(fig, path_no_ext)
 
 
@@ -1844,96 +1182,11 @@ def plot_scorer_speedup(speedups: pd.DataFrame, path_no_ext: str) -> None:
     _save(fig, path_no_ext)
 
 
-def plot_runtime_vs_dataset_size(df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
-    """Runtime vs #instances processed: usefulness is flat (data-free), the rest grow."""
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    for m in df["method"].unique():
-        d = df[df["method"] == m].sort_values("n_instances")
-        ax.plot(d["n_instances"], d["time_s"], "o-", color=METHOD_COLORS.get(m, COLOR_SCHEME[7]), label=m)
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("number of instances processed"); ax.set_ylabel("time (s)")
-    ax.set_title(f"Runtime vs dataset size — {dataset}\n(usefulness is data-free → flat)")
-    ax.legend(ncol=2)
-    _save(fig, path_no_ext)
-
-
-def plot_time_to_stable(df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
-    """Rank agreement with each method's converged ranking vs the wall-clock spent.
-
-    Approximate methods trace a curve (more time → more stable); the exact methods
-    are single stars already at agreement 1.0.
-    """
-    fig, ax = plt.subplots(figsize=(8, 5.2))
-    # A log x-axis needs strictly positive times; a method can be timed at ~0 on a
-    # fast machine (e.g. MDI), which would otherwise make the axis autoscale explode.
-    pos = df["time_s"][df["time_s"] > 0]
-    floor = max(float(pos.min()) * 0.5, 1e-6) if len(pos) else 1e-6
-    for m in df["method"].unique():
-        d = df[df["method"] == m].sort_values("time_s").copy()
-        d["time_s"] = d["time_s"].clip(lower=floor)       # keep the log axis well-defined
-        color = METHOD_COLORS.get(m, COLOR_SCHEME[7])
-        if len(d) == 1:                                   # exact method -> single point
-            ax.scatter(d["time_s"], d["spearman_to_converged"], color=color, marker="*",
-                       s=260, edgecolor="black", zorder=5, label=f"{m} (exact)")
-        else:
-            ax.plot(d["time_s"], d["spearman_to_converged"], "o-", color=color, label=m)
-    ax.set_xscale("log")
-    ax.axhline(0.98, color="grey", ls=":", lw=1)
-    # Place the label in axes-fraction x (data y), so it never depends on the
-    # data range (using get_xlim() here can blow up the figure on a log axis).
-    ax.text(0.01, 0.982, "stable (ρ≥0.98)", transform=ax.get_yaxis_transform(),
-            fontsize=8, color="grey", va="bottom", ha="left")
-    ax.set_xlabel("wall-clock time (s)")
-    ax.set_ylabel("rank agreement with converged ranking (ρ)")
-    ax.set_title(f"Time to a stable ranking — {dataset}")
-    ax.legend(ncol=2, loc="lower right")
-    _save(fig, path_no_ext)
-
-
-def plot_quality_cost_pareto(qc: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
-    """Scatter of ground-truth agreement (quality) vs runtime (cost), per method.
-
-    The Pareto-optimal methods (no other method is both faster *and* better) are
-    ringed; everything below-and-right of the frontier is dominated.
-    """
-    d = qc.copy()
-    # Pareto frontier: maximise quality, minimise time.
-    dominated = set()
-    for i, a in d.iterrows():
-        for _, b in d.iterrows():
-            if (b["time_s"] <= a["time_s"] and b["spearman_gt"] >= a["spearman_gt"]
-                    and (b["time_s"] < a["time_s"] or b["spearman_gt"] > a["spearman_gt"])):
-                dominated.add(i); break
-
-    fig, ax = plt.subplots(figsize=(8, 5.5))
-    # Alternate label offsets (points often tie on the y-axis, so labels collide).
-    order = list(d.sort_values("time_s").index)
-    for rank, i in enumerate(order):
-        r = d.loc[i]
-        color = METHOD_COLORS.get(r["method"], COLOR_SCHEME[7])
-        on_front = i not in dominated
-        ax.scatter(r["time_s"], r["spearman_gt"], s=180 if on_front else 110, color=color,
-                   edgecolor="black", linewidth=2.0 if on_front else 0.6, zorder=4)
-        ax.annotate(r["method"], (r["time_s"], r["spearman_gt"]), textcoords="offset points",
-                    xytext=(0, 10 if rank % 2 == 0 else -16), ha="center", fontsize=9)
-    # connect the frontier
-    front = d.loc[[i for i in d.index if i not in dominated]].sort_values("time_s")
-    ax.plot(front["time_s"], front["spearman_gt"], "--", color="grey", zorder=1,
-            label="Pareto frontier")
-    ax.set_xscale("log")
-    ax.margins(x=0.18, y=0.22)                          # headroom so labels don't clip
-    ax.set_xlabel("runtime (s, log)  →  cheaper is left")
-    ax.set_ylabel("agreement with ground truth (ρ)  →  better is up")
-    ax.set_title(f"Quality vs cost — {dataset}")
-    ax.legend(loc="lower left")
-    _save(fig, path_no_ext)
-
-
 def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, path_no_ext: str) -> None:
-    """Three panels: accuracy, ground-truth agreement, and cross-strategy stability."""
+    """Two panels: accuracy and cross-strategy ranking stability."""
     summary, stability = binning["summary"], binning["stability"]
     strategies = list(summary["strategy"].unique())
-    fig, axs = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
 
     # (1) accuracy vs bins per strategy
     ax = axs[0]
@@ -1943,16 +1196,8 @@ def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, pat
     ax.set_xlabel("bins"); ax.set_ylabel("test accuracy"); ax.set_title("Accuracy vs binning")
     ax.legend(title="strategy")
 
-    # (2) ground-truth agreement vs bins per strategy
+    # (2) cross-strategy ranking agreement (Spearman) vs bins
     ax = axs[1]
-    for i, s in enumerate(strategies):
-        d = summary[summary["strategy"] == s].sort_values("bins")
-        ax.plot(d["bins"], d["spearman_gt"], "o-", color=COLOR_SCHEME[i], label=s)
-    ax.set_xlabel("bins"); ax.set_ylabel("Spearman ρ vs ground truth")
-    ax.set_title("Ranking quality vs binning"); ax.legend(title="strategy")
-
-    # (3) cross-strategy ranking agreement (Spearman) vs bins
-    ax = axs[2]
     pair_label = stability["strategy_a"] + "–" + stability["strategy_b"]
     for i, pl in enumerate(pair_label.unique()):
         d = stability[pair_label == pl].sort_values("bins")

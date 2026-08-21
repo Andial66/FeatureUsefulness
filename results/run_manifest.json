@@ -4,17 +4,14 @@
   "bins": 6,
   "methods": [
     "usefulness",
-    "mdi",
     "permutation",
     "shap",
-    "lime",
-    "integrated_gradients"
+    "lime"
   ],
   "datasets": [
-    "adult_income"
+    "bike_sharing"
   ],
   "experiments": [
-    "synthetic",
     "scores",
     "comparison",
     "profiling",
