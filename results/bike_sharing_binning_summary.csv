@@ -5,7 +5,7 @@ bike_sharing,uniform,5,0.8392261219792866
 bike_sharing,uniform,6,0.8506041426927504
 bike_sharing,quantile,3,0.8420742232451094
 bike_sharing,quantile,4,0.8490218642117376
-bike_sharing,quantile,5,0.8342059838895283
+bike_sharing,quantile,5,0.8330408515535097
 bike_sharing,quantile,6,0.8510788262370541
 bike_sharing,kmeans,3,0.8446058688147294
 bike_sharing,kmeans,4,0.8461449942462602

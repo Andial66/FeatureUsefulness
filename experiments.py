@@ -45,6 +45,12 @@ METHOD_COLORS = {
     "lime":        COLOR_SCHEME[3],
 }
 
+PRETTY_NAMES = {
+    "california":   "California Housing",
+    "bike_sharing": "Bike Sharing",
+    "adult_income": "Adult Income",
+}
+
 
 @dataclass
 class Config:
@@ -74,7 +80,7 @@ def set_all_seeds(seed: int) -> None:
 
 
 def set_plot_style() -> None:
-    """A clean, paper-friendly matplotlib style (colour-blind safe, legible).
+    """A clean, paper-friendly matplotlib style (color-blind safe, legible).
 
     Typography matches a LaTeX-typeset paper: every piece of text (titles,
     labels, ticks, legends) is rendered *through* a real LaTeX install
@@ -471,7 +477,7 @@ def _densify(col: np.ndarray) -> Tuple[np.ndarray, int]:
 def train_tree(dataset: str, bins: int, strategy: str = "uniform", seed: int = 42,
                max_depth: int = 100_000, leaves: int = 1_000_000,
                correct_categorical_domains: bool = True) -> ModelBundle:
-    """Train one decision tree for ``dataset`` with the requested discretisation.
+    """Train one decision tree for ``dataset`` with the requested discretization.
 
     Parameters
     ----------
@@ -587,7 +593,7 @@ def importance_lime(bundle: ModelBundle, sample: int = 100, seed: int = 42) -> n
     """Global LIME importance: mean absolute local weight over a sample of rows.
 
     All features are treated as categorical (they are ordinal bins), so LIME's
-    continuous discretiser is switched off.
+    continuous discretizer is switched off.
     """
     from lime.lime_tabular import LimeTabularExplainer
     X = bundle.X_train.to_numpy(dtype=float)
@@ -912,9 +918,9 @@ def profile_scorer_speedup(bundle: ModelBundle, repeat: int = 3) -> Dict[str, fl
 
 def mean_usefulness_importance(dataset: str, bins: int, strategy: str,
                                n_models: int, seed: int, leaves: int) -> Tuple[np.ndarray, List[str], float]:
-    """Average (sum-normalised) usefulness importance over ``n_models`` trees.
+    """Average (sum-normalized) usefulness importance over ``n_models`` trees.
 
-    Averaging the normalised vectors makes the aggregate scale-invariant, so
+    Averaging the normalized vectors makes the aggregate scale-invariant, so
     models with larger entity spaces do not dominate the mean.
     """
     rng = random.Random(seed)
@@ -1084,7 +1090,7 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
       * ``corr_spearman`` - mean pairwise Spearman rank-correlation matrix;
       * ``rbo``           - mean pairwise Rank-Biased Overlap matrix (top-weighted;
                             persistence ``cfg.rbo_p``);
-      * ``mean_importance`` - mean normalised importance per (feature, method);
+      * ``mean_importance`` - mean normalized importance per (feature, method);
       * ``features``      - feature order (by mean usefulness), for plotting.
     """
     n_models = cfg.n_models if n_models is None else n_models
@@ -1135,23 +1141,24 @@ def _save(fig, path_no_ext: str) -> None:
 
 
 def plot_method_importance_heatmap(comparison: Dict[str, object], path_no_ext: str) -> None:
-    """Compact overview: normalised importance, features (sorted) x methods."""
+    """Compact overview: normalized importance, features (sorted) x methods."""
     df = comparison["mean_importance"].copy()
     df = df.reindex(df["usefulness"].sort_values(ascending=False).index)  # sort by usefulness
-    # column-normalise so each method's colour spans [0, 1] (relative within method)
+    # column-normalize so each method's color spans [0, 1] (relative within method)
     disp = df / df.max(axis=0)
     fig, ax = plt.subplots(figsize=(1.4 * df.shape[1] + 2, 0.42 * df.shape[0] + 2))
     im = ax.imshow(disp.values, aspect="auto", cmap="Blues", vmin=0, vmax=1)
     ax.set_xticks(range(df.shape[1]))
-    ax.set_xticklabels(df.columns, rotation=30, ha="right")
+    ax.set_xticklabels(df.columns, rotation=0, ha="center")
     ax.set_yticks(range(df.shape[0]))
     ax.set_yticklabels(df.index)
-    ax.set_title(f"Normalised feature importance — {comparison['dataset']} ({comparison['bins']} bins)")
-    for i in range(df.shape[0]):                       # annotate cells (text stays ink-coloured)
+    ds = PRETTY_NAMES.get(comparison['dataset'], comparison['dataset'])
+    ax.set_title(f"Normalized feature importance - {ds} ({comparison['bins']} bins)")
+    for i in range(df.shape[0]):                       # annotate cells (text stays ink-colored)
         for j in range(df.shape[1]):
             ax.text(j, i, f"{disp.values[i, j]:.2f}", ha="center", va="center",
                     fontsize=8, color="#111" if disp.values[i, j] < 0.6 else "white")
-    fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02, label="importance (col-normalised)")
+    fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02, label="importance (normalized)")
     _save(fig, path_no_ext)
 
 
@@ -1164,12 +1171,13 @@ def plot_rank_correlation_heatmap(comparison: Dict[str, object], path_no_ext: st
     im = ax.imshow(M.values, cmap="RdBu_r", norm=norm)
     ax.set_xticks(range(len(M))); ax.set_xticklabels(M.columns, rotation=30, ha="right")
     ax.set_yticks(range(len(M)))
-    ax.set_yticklabels(M.index, rotation=30, ha="right", rotation_mode="anchor")
+    ax.set_yticklabels(M.index, rotation=0, ha="right")
     for i in range(len(M)):
         for j in range(len(M)):
             ax.text(j, i, f"{M.values[i, j]:.2f}", ha="center", va="center", fontsize=8,
                     color="#111" if abs(M.values[i, j]) < 0.6 else "white")
-    ax.set_title(f"Rank correlation between methods — {comparison['dataset']}")
+    ds = PRETTY_NAMES.get(comparison['dataset'], comparison['dataset'])
+    ax.set_title(f"Rank correlation - {ds}")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=r"Spearman $\rho$")
     _save(fig, path_no_ext)
 
@@ -1183,12 +1191,13 @@ def plot_rank_biased_overlap_heatmap(comparison: Dict[str, object], path_no_ext:
     im = ax.imshow(M.values, cmap="viridis", vmin=0, vmax=1)
     ax.set_xticks(range(len(M))); ax.set_xticklabels(M.columns, rotation=30, ha="right")
     ax.set_yticks(range(len(M)))
-    ax.set_yticklabels(M.index, rotation=30, ha="right", rotation_mode="anchor")
+    ax.set_yticklabels(M.index, rotation=0, ha="right")
     for i in range(len(M)):
         for j in range(len(M)):
             ax.text(j, i, f"{M.values[i, j]:.2f}", ha="center", va="center", fontsize=8,
                     color="#111" if M.values[i, j] > 0.6 else "white")
-    ax.set_title(f"Rank-Biased Overlap between methods — {comparison['dataset']}")
+    ds = PRETTY_NAMES.get(comparison['dataset'], comparison['dataset'])
+    ax.set_title(f"Rank-Biased Overlap - {ds}")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="RBO")
     _save(fig, path_no_ext)
 
@@ -1203,9 +1212,10 @@ def plot_topk_intersection(comparison: Dict[str, object], path_no_ext: str) -> N
     fig, ax = plt.subplots(figsize=(1.3 * len(methods) + 2, 4.5))
     for i, k in enumerate(ks):
         ax.bar(x + i * w - 0.4 + w / 2, df[k].values, width=w, label=k, color=COLOR_SCHEME[i])
-    ax.set_xticks(x); ax.set_xticklabels(methods, rotation=20, ha="right")
-    ax.set_ylabel("features shared with usefulness top-k")
-    ax.set_title(f"Overlap with the usefulness ranking — {comparison['dataset']}")
+    ax.set_xticks(x); ax.set_xticklabels(methods, rotation=0, ha="center")
+    ax.set_ylabel("# shared features (top-k)")
+    ds = PRETTY_NAMES.get(comparison['dataset'], comparison['dataset'])
+    ax.set_title(f"Top-k overlap with usefulness - {ds}")
     ax.legend(title="", ncol=len(ks))
     _save(fig, path_no_ext)
 
@@ -1222,7 +1232,7 @@ def plot_scaling(scaling_df: pd.DataFrame, dataset: str, path_no_ext: str) -> No
     ax.set_yscale("log"); ax.set_xlabel("number of bins")
     ax.set_ylabel("time, all features (s)"); ax.set_title("Time vs number of bins")
 
-    fig.suptitle(f"Usefulness-score scaling — {dataset}", fontweight="bold")
+    fig.suptitle(f"Usefulness-score scaling - {PRETTY_NAMES.get(dataset, dataset)}", fontweight="bold")
     fig.tight_layout()
     _save(fig, path_no_ext)
 
@@ -1259,7 +1269,7 @@ def plot_method_scaling(df: pd.DataFrame, dataset: str, path_no_ext: str) -> Non
                     label=fr"usefulness fit $\propto |T|^{{{slope:.2f}}}$")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("number of tree nodes"); ax.set_ylabel("time, all features (s)")
-    ax.set_title(f"Runtime vs tree size, per method — {dataset}")
+    ax.set_title(f"Runtime vs tree size, per method - {PRETTY_NAMES.get(dataset, dataset)}")
     ax.legend(fontsize=9)
     fig.tight_layout()
     _save(fig, f"{path_no_ext}_runtime")
@@ -1274,7 +1284,7 @@ def plot_method_scaling(df: pd.DataFrame, dataset: str, path_no_ext: str) -> Non
     ax.set_xticks(range(len(order))); ax.set_xticklabels(order, rotation=20, ha="right")
     ax.set_ylabel("coeff. of variation (std / mean)")
     n_reps = int(df["n_repeats"].iloc[0]) if len(df) else 0
-    ax.set_title(f"Timing variance across tree sizes — {dataset}\n({n_reps} reps/size)")
+    ax.set_title(f"Timing variance across tree sizes - {PRETTY_NAMES.get(dataset, dataset)}\n({n_reps} reps/size)")
     fig.tight_layout()
     _save(fig, f"{path_no_ext}_variance")
 
@@ -1329,14 +1339,14 @@ if __name__ == "__main__":       # tiny smoke test (offline: uses only Bike Shar
 
 
 def plot_method_runtimes(runtime_df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
-    """Per-method wall-clock cost on one model (log y — costs span decades)."""
+    """Per-method wall-clock cost on one model (log y -costs span decades)."""
     df = runtime_df.sort_values("time_s")
     colors = [METHOD_COLORS.get(m, COLOR_SCHEME[7]) for m in df["method"]]
     fig, ax = plt.subplots(figsize=(1.3 * len(df) + 2, 4.5))
     ax.bar(df["method"], df["time_s"], color=colors, edgecolor="black", linewidth=0.6)
     ax.set_yscale("log")
     ax.set_ylabel("time (s, log scale)")
-    ax.set_title(f"Runtime per importance method — {dataset}\n"
+    ax.set_title(f"Runtime per importance method - {PRETTY_NAMES.get(dataset, dataset)}\n"
                  f"(tree with {int(df['n_nodes'].iloc[0])} nodes, {int(df['n_features'].iloc[0])} features)")
     for i, (m, t) in enumerate(zip(df["method"], df["time_s"])):
         ax.text(i, t, f"{t:.3g}s", ha="center", va="bottom", fontsize=8)
@@ -1383,7 +1393,7 @@ def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, pat
         d = summary[summary["strategy"] == s].sort_values("bins")
         ax.plot(d["bins"], d["accuracy"], "o-", color=COLOR_SCHEME[i], label=s)
     ax.set_xlabel("bins"); ax.set_ylabel("test accuracy")
-    ax.set_title(f"Accuracy vs binning — {dataset}")
+    ax.set_title(f"Accuracy vs binning - {PRETTY_NAMES.get(dataset, dataset)}")
     ax.legend(title="strategy")
     fig.tight_layout()
     _save(fig, f"{path_no_ext}_accuracy")
@@ -1397,10 +1407,11 @@ def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, pat
             d = stability[pair_label == pl].sort_values("bins")
             ax.plot(d["bins"], d[metric], "o-", color=COLOR_SCHEME[i], label=pl)
         ax.set_xlabel("bins"); ax.set_ylabel(ylabel)
+        ax.set_xticks(sorted(stability["bins"].unique()))
         if metric == "rbo":
             ax.set_ylim(0, 1.02)
-        ax.set_title(f"How much the ranking moves with strategy — {dataset}")
-        ax.legend(title="pair")
+        ax.set_title(f"Ranking stability across strategies - {PRETTY_NAMES.get(dataset, dataset)}")
+        ax.legend()
         fig.tight_layout()
         _save(fig, f"{path_no_ext}_{fname}")
 
@@ -1416,7 +1427,7 @@ def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, pat
         ax.set_xlabel("bin-count pair"); ax.set_ylabel(ylabel)
         if metric == "rbo":
             ax.set_ylim(0, 1.02)
-        ax.set_title(f"How much the ranking moves with number of bins — {dataset}")
+        ax.set_title(f"Ranking stability across bin counts - {PRETTY_NAMES.get(dataset, dataset)}")
         ax.legend(title="strategy")
         fig.tight_layout()
         _save(fig, f"{path_no_ext}_{fname}")
@@ -1428,8 +1439,6 @@ def plot_scores(scores: Dict[str, object], dataset: str, path_no_ext: str) -> No
     with Q1–Q3 whiskers and mean accuracy."""
     per_bins = scores["per_bins"]
     bins_list = sorted(per_bins)
-    titles = {"california": "California Housing", "adult_income": "Adult Income",
-              "bike_sharing": "Bike Sharing"}
     color = {"california": COLOR_SCHEME[5], "adult_income": COLOR_SCHEME[1],
              "bike_sharing": COLOR_SCHEME[3]}.get(dataset, COLOR_SCHEME[0])
 
@@ -1447,6 +1456,6 @@ def plot_scores(scores: Dict[str, object], dataset: str, path_no_ext: str) -> No
         ax.ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
         ax.text(0.5, -0.12, f"Avg Acc = {d['mean_accuracy']:.3f}", transform=ax.transAxes,
                 ha="center", va="top", bbox=dict(facecolor="white", edgecolor="black"))
-        fig.suptitle(f"Usefulness score — {titles.get(dataset, dataset)}", fontweight="bold", y=1.04)
+        fig.suptitle(f"Usefulness score - {PRETTY_NAMES.get(dataset, dataset)}", fontweight="bold", y=1.04)
         fig.tight_layout()
         _save(fig, f"{path_no_ext}_{bins}bins")

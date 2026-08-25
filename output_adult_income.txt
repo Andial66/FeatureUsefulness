@@ -1,9 +1,5 @@
-Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "permutation", "shap", "lime"], "datasets": ["adult_income"], "experiments": ["synthetic", "scores", "comparison", "profiling", "binning"]}
+Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "permutation", "shap", "lime"], "datasets": ["adult_income"], "experiments": ["scores", "comparison", "profiling", "binning"]}
 run_tree_tests: all assertions passed
-
-[synthetic] controlled-feature study (known ground truth) ...
-    clean recovery: accuracy=1.000, Spearman(emp,true)=1.000, noise AUC=1.000
-    redundancy: x0+x0_copy=0.25 (true x0=0.25)
 
 ======================================================================
 Dataset: adult_income
@@ -15,34 +11,32 @@ Dataset: adult_income
       5 bins: capital-gain         (mean acc 0.838)
       6 bins: capital-gain         (mean acc 0.837)
 [A] comparison of importance methods ...
-    ground-truth agreement (Spearman ρ, mean [95% CI]):
-      usefulness             0.878 [0.878, 0.878]
-      permutation            0.879 [0.878, 0.880]
-      shap                   0.878 [0.878, 0.878]
-      lime                   0.878 [0.878, 0.878]
-    paired Wilcoxon usefulness vs SHAP: p = 1 (n=20)  rankings identical across models -> no detectable difference
-[B] runtime & memory profiling ...
-    per-method runtime (s):
-method
-usefulness     1.0542
-permutation    0.3173
-shap           0.0641
-lime           0.8408
-    scorer speedup (deepcopy -> copy-free): 3.9x
+    mean Spearman rank correlation with usefulness:
+      lime                   0.879
+      permutation            0.864
+      shap                   0.862
+    mean Rank-Biased Overlap with usefulness (p=0.9):
+      lime                   0.920
+      permutation            0.809
+      shap                   0.777
+[B] runtime profiling ...
+    scorer speedup (deepcopy -> copy-free): 3.0x
 [C] binning-strategy sensitivity ...
-    accuracy / ground-truth ρ by strategy and bins:
-strategy  bins  accuracy  spearman_gt
- uniform     3     0.833        0.683
- uniform     4     0.836        0.683
- uniform     5     0.838        0.878
- uniform     6     0.837        0.878
-quantile     3     0.809        0.293
-quantile     4     0.812        0.293
-quantile     5     0.812        0.293
-quantile     6     0.808        0.293
-  kmeans     3     0.835        0.878
-  kmeans     4     0.835        0.683
-  kmeans     5     0.835        0.878
-  kmeans     6     0.837        0.878
-
-Done. Tables and figures written to 'results/'.
+    accuracy by strategy and bins:
+strategy  bins  accuracy
+ uniform     3     0.833
+ uniform     4     0.836
+ uniform     5     0.838
+ uniform     6     0.837
+quantile     3     0.809
+quantile     4     0.812
+quantile     5     0.812
+quantile     6     0.808
+  kmeans     3     0.835
+  kmeans     4     0.835
+  kmeans     5     0.835
+  kmeans     6     0.837
+    cross-strategy ranking agreement (mean, fixed bins), p=0.9:
+      Spearman rho = 0.423   RBO = 0.725
+    cross-#bins ranking agreement (mean, fixed strategy), p=0.9:
+      Spearman rho = 0.806   RBO = 0.891

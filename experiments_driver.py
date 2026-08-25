@@ -142,12 +142,6 @@ def main(argv=None) -> None:
 
             model = ux.train_tree(ds, bins=args.bins, strategy="uniform",
                                   seed=args.seed, leaves=cfg.leaves_per_bin[ds] * args.bins)
-            runtimes = ux.method_runtime_comparison(model, cfg, methods=methods)
-            runtimes.to_csv(f"{tag}_method_runtimes.csv", index=False)
-            ux.plot_method_runtimes(runtimes, ds, f"{tag}_method_runtimes")
-            print("    per-method runtime (s):")
-            print(runtimes.set_index("method")["time_s"].round(4).to_string())
-
             # how much of the usefulness runtime was copy.deepcopy overhead
             speedup = pd.DataFrame([ux.profile_scorer_speedup(model)])
             speedup.to_csv(f"{tag}_scorer_speedup.csv", index=False)
