@@ -1,4 +1,4 @@
-Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "permutation", "shap", "lime"], "datasets": ["adult_income"], "experiments": ["scores", "comparison", "profiling", "binning"]}
+Run manifest: {"seed": 42, "n_models": 50, "bins": 6, "methods": ["usefulness", "permutation", "shap", "lime"], "datasets": ["adult_income"], "experiments": ["scores", "comparison", "profiling", "binning"]}
 run_tree_tests: all assertions passed
 
 ======================================================================
@@ -6,37 +6,41 @@ Dataset: adult_income
 ======================================================================
 [main] usefulness scores ...
     top feature by median score, per bin count:
-      3 bins: capital-gain         (mean acc 0.833)
-      4 bins: capital-gain         (mean acc 0.836)
-      5 bins: capital-gain         (mean acc 0.838)
-      6 bins: capital-gain         (mean acc 0.837)
+      3 bins: capital-gain         (mean acc 0.835)
+      4 bins: capital-gain         (mean acc 0.838)
+      5 bins: capital-gain         (mean acc 0.840)
+      6 bins: capital-gain         (mean acc 0.840)
+      8 bins: capital-gain         (mean acc 0.837)
 [A] comparison of importance methods ...
     mean Spearman rank correlation with usefulness:
-      lime                   0.879
-      permutation            0.864
-      shap                   0.862
+      shap                   0.869
+      lime                   0.866
+      permutation            0.858
     mean Rank-Biased Overlap with usefulness (p=0.9):
-      lime                   0.920
-      permutation            0.809
-      shap                   0.777
+      lime                   0.919
+      permutation            0.814
+      shap                   0.779
 [B] runtime profiling ...
-    scorer speedup (deepcopy -> copy-free): 3.0x
+    scorer speedup (deepcopy -> copy-free): 3.2x
 [C] binning-strategy sensitivity ...
     accuracy by strategy and bins:
 strategy  bins  accuracy
  uniform     3     0.833
  uniform     4     0.836
  uniform     5     0.838
- uniform     6     0.837
-quantile     3     0.809
-quantile     4     0.812
-quantile     5     0.812
-quantile     6     0.808
+ uniform     6     0.838
+ uniform     8     0.833
+quantile     3     0.808
+quantile     4     0.813
+quantile     5     0.813
+quantile     6     0.809
+quantile     8     0.809
   kmeans     3     0.835
   kmeans     4     0.835
-  kmeans     5     0.835
-  kmeans     6     0.837
+  kmeans     5     0.836
+  kmeans     6     0.838
+  kmeans     8     0.835
     cross-strategy ranking agreement (mean, fixed bins), p=0.9:
-      Spearman rho = 0.423   RBO = 0.725
+      Spearman rho = 0.455   RBO = 0.739
     cross-#bins ranking agreement (mean, fixed strategy), p=0.9:
-      Spearman rho = 0.806   RBO = 0.891
+      Spearman rho = 0.819   RBO = 0.896

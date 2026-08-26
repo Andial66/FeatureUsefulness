@@ -1,4 +1,4 @@
-Run manifest: {"seed": 42, "n_models": 20, "bins": 6, "methods": ["usefulness", "permutation", "shap", "lime"], "datasets": ["bike_sharing"], "experiments": ["scores", "comparison", "profiling", "binning"]}
+Run manifest: {"seed": 42, "n_models": 50, "bins": 6, "methods": ["usefulness", "permutation", "shap", "lime"], "datasets": ["bike_sharing"], "experiments": ["scores", "comparison", "profiling", "binning"]}
 run_tree_tests: all assertions passed
 
 ======================================================================
@@ -6,37 +6,41 @@ Dataset: bike_sharing
 ======================================================================
 [main] usefulness scores ...
     top feature by median score, per bin count:
-      3 bins: hr                   (mean acc 0.841)
+      3 bins: hr                   (mean acc 0.839)
       4 bins: hr                   (mean acc 0.845)
       5 bins: hr                   (mean acc 0.839)
-      6 bins: hr                   (mean acc 0.851)
+      6 bins: hr                   (mean acc 0.850)
+      8 bins: hr                   (mean acc 0.862)
 [A] comparison of importance methods ...
     mean Spearman rank correlation with usefulness:
-      shap                   0.920
-      permutation            0.875
-      lime                   0.708
+      shap                   0.919
+      permutation            0.883
+      lime                   0.685
     mean Rank-Biased Overlap with usefulness (p=0.9):
-      shap                   0.925
-      permutation            0.913
+      shap                   0.929
+      permutation            0.917
       lime                   0.844
 [B] runtime profiling ...
     scorer speedup (deepcopy -> copy-free): 4.1x
 [C] binning-strategy sensitivity ...
     accuracy by strategy and bins:
 strategy  bins  accuracy
- uniform     3     0.841
- uniform     4     0.845
- uniform     5     0.839
+ uniform     3     0.840
+ uniform     4     0.846
+ uniform     5     0.841
  uniform     6     0.851
+ uniform     8     0.862
 quantile     3     0.842
 quantile     4     0.849
 quantile     5     0.833
-quantile     6     0.851
-  kmeans     3     0.845
-  kmeans     4     0.846
-  kmeans     5     0.840
-  kmeans     6     0.855
+quantile     6     0.852
+quantile     8     0.860
+  kmeans     3     0.844
+  kmeans     4     0.847
+  kmeans     5     0.841
+  kmeans     6     0.854
+  kmeans     8     0.863
     cross-strategy ranking agreement (mean, fixed bins), p=0.9:
-      Spearman rho = 0.819   RBO = 0.912
+      Spearman rho = 0.838   RBO = 0.917
     cross-#bins ranking agreement (mean, fixed strategy), p=0.9:
-      Spearman rho = 0.825   RBO = 0.891
+      Spearman rho = 0.841   RBO = 0.901

@@ -9,7 +9,7 @@ It orchestrates :mod:`experiments` and writes every table
 
 Examples
 --------
-Run everything on the offline Bike Sharing dataset with the paper's 20 models::
+Run everything on the offline Bike Sharing dataset with the paper's 50 models::
 
     python experiments_driver.py --datasets bike_sharing
 
@@ -57,6 +57,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42, help="master random seed")
     p.add_argument("--sample", type=int, default=200, help="rows for sampling-based methods")
     p.add_argument("--no-lime", action="store_true", help="skip LIME")
+    p.add_argument("--leaves-grid", nargs="+", type=int, default=[50, 100, 200],
+                   help="per-bin leaf-budget multipliers for tree-size sweep in scores experiment (default: 50 100 200)")
     p.add_argument("--out", default="results", help="output directory")
     return p.parse_args(argv)
 
@@ -75,7 +77,8 @@ def main(argv=None) -> None:
 
     ux.set_all_seeds(args.seed)
     ux.set_plot_style()
-    cfg = ux.Config(seed=args.seed, n_models=args.n_models, importance_sample=args.sample)
+    cfg = ux.Config(seed=args.seed, n_models=args.n_models, importance_sample=args.sample,
+                    leaves_grid=tuple(args.leaves_grid))
     methods = method_list(args)
 
     # A run manifest makes every figure traceable back to its exact settings.

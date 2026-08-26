@@ -57,8 +57,9 @@ class Config:
     """All knobs of the experiments in one reproducible place."""
 
     seed: int = 42                       # master seed
-    n_models: int = 20                   # trees trained per configuration (paper uses 20)
-    bins_grid: Tuple[int, ...] = (3, 4, 5, 6)
+    n_models: int = 50                   # trees trained per configuration (paper uses 50)
+    bins_grid: Tuple[int, ...] = (3, 4, 5, 6, 8)
+    leaves_grid: Tuple[int, ...] = (50, 100, 200)  # leaf-budget multipliers per bin for tree-size sweep
     strategies: Tuple[str, ...] = ("uniform", "quantile", "kmeans")
     test_size: float = 0.20
     # per-dataset leaf regularization, matching the paper (100*bins / 150*bins).
@@ -785,20 +786,31 @@ def profile_usefulness(bundle: ModelBundle, repeat: int = 5) -> Dict[str, float]
 
 def scaling_experiment(dataset: str, cfg: Config, strategy: str = "uniform",
                        bins_list: Optional[Sequence[int]] = None,
-                       seed: Optional[int] = None) -> pd.DataFrame:
+                       seed: Optional[int] = None, repeat: int = 5) -> pd.DataFrame:
     """Sweep #bins and profile the usefulness algorithm's own runtime.
 
     Varies ``bins`` at a fixed, generous leaf budget, isolating how the
     usefulness score's cost grows with the categorical entity-space size.
+    ``repeat`` trees (different seeds) are timed per bin count; the row stores
+    mean and std of ``time_total_s`` for a variance companion plot.
     (For how *every* method's runtime scales with tree size instead, see
     :func:`method_scaling_experiment`.)
     """
     seed = cfg.seed if seed is None else seed
     bins_list = list(cfg.bins_grid) if bins_list is None else list(bins_list)
+    rng = random.Random(seed)
     rows = []
     for bins in bins_list:
-        b = train_tree(dataset, bins=bins, strategy=strategy, seed=seed, leaves=100 * bins)
-        rows.append(profile_usefulness(b))
+        profiles = []
+        for _ in range(repeat):
+            s = rng.randint(0, 100_000)
+            b = train_tree(dataset, bins=bins, strategy=strategy, seed=s, leaves=100 * bins)
+            profiles.append(profile_usefulness(b))
+        times = [p["time_total_s"] for p in profiles]
+        row = profiles[0].copy()
+        row["time_total_s"] = float(np.mean(times))
+        row["time_std_s"] = float(np.std(times))
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -917,15 +929,18 @@ def profile_scorer_speedup(bundle: ModelBundle, repeat: int = 3) -> Dict[str, fl
 
 
 def mean_usefulness_importance(dataset: str, bins: int, strategy: str,
-                               n_models: int, seed: int, leaves: int) -> Tuple[np.ndarray, List[str], float]:
+                               n_models: int, seed: int, leaves: int
+                               ) -> Tuple[np.ndarray, np.ndarray, List[str], float]:
     """Average (sum-normalized) usefulness importance over ``n_models`` trees.
 
-    Averaging the normalized vectors makes the aggregate scale-invariant, so
-    models with larger entity spaces do not dominate the mean.
+    Returns (mean, std, features, mean_accuracy).  Averaging the normalized
+    vectors makes the aggregate scale-invariant, so models with larger entity
+    spaces do not dominate the mean.
     """
     rng = random.Random(seed)
     acc_sum = 0.0
     agg = None
+    agg_sq = None
     features = None
     for _ in range(n_models):
         s = rng.randint(0, 100_000)
@@ -933,8 +948,11 @@ def mean_usefulness_importance(dataset: str, bins: int, strategy: str,
         features = b.features
         v = normalize_importance(usefulness_scores(b.clf, b.domains, b.features))
         agg = v if agg is None else agg + v
+        agg_sq = v ** 2 if agg_sq is None else agg_sq + v ** 2
         acc_sum += b.accuracy
-    return agg / n_models, list(features), acc_sum / n_models
+    mean = agg / n_models
+    std = np.sqrt(np.clip(agg_sq / n_models - mean ** 2, 0, None))
+    return mean, std, list(features), acc_sum / n_models
 
 
 def run_binning_experiment(dataset: str, cfg: Config, n_models: Optional[int] = None,
@@ -958,20 +976,23 @@ def run_binning_experiment(dataset: str, cfg: Config, n_models: Optional[int] = 
 
     # mean importance vector per (strategy, bins)
     mean_imp: Dict[Tuple[str, int], np.ndarray] = {}
+    std_imp: Dict[Tuple[str, int], np.ndarray] = {}
     features_ref: List[str] = []
     summary_rows, importance_rows = [], []
 
     for strategy in strategies:
         for bins in bins_grid:
-            v, features, acc = mean_usefulness_importance(
+            v, v_std, features, acc = mean_usefulness_importance(
                 dataset, bins, strategy, n_models, seed, leaves=leaves_per_bin * bins)
             mean_imp[(strategy, bins)] = v
+            std_imp[(strategy, bins)] = v_std
             features_ref = features
             summary_rows.append({"dataset": dataset, "strategy": strategy, "bins": bins,
                                  "accuracy": acc})
-            for f, val in zip(features, v):
+            for f, val, val_std in zip(features, v, v_std):
                 importance_rows.append({"strategy": strategy, "bins": bins,
-                                        "feature": f.replace("_binned", ""), "importance": val})
+                                        "feature": f.replace("_binned", ""),
+                                        "importance": val, "std": val_std})
 
     # cross-strategy stability at each bin count (does the ranking depend on
     # *how* we discretize, holding the number of bins fixed?)
@@ -1021,16 +1042,22 @@ def run_binning_experiment(dataset: str, cfg: Config, n_models: Optional[int] = 
 
 def run_score_experiment(dataset: str, cfg: Config, strategy: str = "uniform",
                          n_models: Optional[int] = None, bins_grid: Optional[Sequence[int]] = None,
-                         seed: Optional[int] = None) -> Dict[str, object]:
+                         seed: Optional[int] = None,
+                         leaves_grid: Optional[Sequence[int]] = None) -> Dict[str, object]:
     """Compute the usefulness-score summary per bin count.
 
     Returns ``{"per_bins": {bins: {...}}, "table": DataFrame}``.  The default
     ``uniform`` strategy matches the paper text.
+
+    ``leaves_grid`` is a list of per-bin leaf-budget multipliers (e.g. [50, 100, 200]).
+    Samples from all tree sizes are pooled before computing Q1/median/Q3, so the
+    intervals reflect both model randomness and tree-size variation.
     """
     n_models = cfg.n_models if n_models is None else n_models
     bins_grid = list(cfg.bins_grid) if bins_grid is None else list(bins_grid)
     seed = cfg.seed if seed is None else seed
     leaves_per_bin = cfg.leaves_per_bin[dataset]
+    leaves_grid = list(cfg.leaves_grid) if leaves_grid is None else list(leaves_grid)
 
     per_bins, rows = {}, []
     for bins in bins_grid:
@@ -1038,13 +1065,14 @@ def run_score_experiment(dataset: str, cfg: Config, strategy: str = "uniform",
         per_feature: Dict[str, List[float]] = {}
         features: List[str] = []
         accuracies = []
-        for _ in range(n_models):
-            s = rng.randint(0, 100_000)
-            b = train_tree(dataset, bins=bins, strategy=strategy, seed=s, leaves=leaves_per_bin * bins)
-            features = b.features
-            for f, val in zip(b.features, usefulness_scores(b.clf, b.domains, b.features)):
-                per_feature.setdefault(f, []).append(val)
-            accuracies.append(b.accuracy)
+        for leaves_mult in leaves_grid:
+            for _ in range(n_models):
+                s = rng.randint(0, 100_000)
+                b = train_tree(dataset, bins=bins, strategy=strategy, seed=s, leaves=leaves_mult * bins)
+                features = b.features
+                for f, val in zip(b.features, usefulness_scores(b.clf, b.domains, b.features)):
+                    per_feature.setdefault(f, []).append(val)
+                accuracies.append(b.accuracy)
 
         # aggregate to quartiles and sort by median (as in the paper figures)
         stats = [(f.replace("_binned", ""), np.percentile(per_feature[f], 25),
@@ -1078,6 +1106,13 @@ def _mean_of_frames(frames: List[pd.DataFrame]) -> pd.DataFrame:
     return acc / len(frames)
 
 
+def _std_of_frames(frames: List[pd.DataFrame]) -> pd.DataFrame:
+    """Element-wise std of a list of identically-shaped/labelled DataFrames."""
+    mean = _mean_of_frames(frames)
+    sq = _mean_of_frames([f ** 2 for f in frames])
+    return (sq - mean ** 2).clip(lower=0) ** 0.5
+
+
 def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
                               methods: Sequence[str] = ("usefulness", "permutation",
                                                         "shap", "lime"),
@@ -1100,6 +1135,7 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
 
     topk_frames, corr_frames, rbo_frames = [], [], []
     imp_accum: Dict[str, np.ndarray] = {}
+    imp_sq_accum: Dict[str, np.ndarray] = {}
     features: List[str] = []
 
     for _ in range(n_models):
@@ -1115,18 +1151,27 @@ def run_comparison_experiment(dataset: str, cfg: Config, bins: int = 6,
         for m in present:
             nv = normalize_importance(imp[m])
             imp_accum[m] = nv if m not in imp_accum else imp_accum[m] + nv
+            imp_sq_accum[m] = nv ** 2 if m not in imp_sq_accum else imp_sq_accum[m] + nv ** 2
 
-    mean_importance = pd.DataFrame(
-        {m: imp_accum[m] / n_models for m in imp_accum},
-        index=[f.replace("_binned", "") for f in features])
+    feat_labels = [f.replace("_binned", "") for f in features]
+    mean_imp_arr = {m: imp_accum[m] / n_models for m in imp_accum}
+    sq_imp_arr = {m: imp_sq_accum[m] / n_models for m in imp_sq_accum}
+    mean_importance = pd.DataFrame(mean_imp_arr, index=feat_labels)
+    std_importance = pd.DataFrame(
+        {m: np.sqrt(np.clip(sq_imp_arr[m] - mean_imp_arr[m] ** 2, 0, None)) for m in mean_imp_arr},
+        index=feat_labels)
 
     return {
         "dataset": dataset, "bins": bins, "n_models": n_models,
         "topk": _mean_of_frames(topk_frames),
+        "std_topk": _std_of_frames(topk_frames),
         "corr_spearman": _mean_of_frames(corr_frames),
+        "std_corr_spearman": _std_of_frames(corr_frames),
         "rbo": _mean_of_frames(rbo_frames),
+        "std_rbo": _std_of_frames(rbo_frames),
         "mean_importance": mean_importance,
-        "features": [f.replace("_binned", "") for f in features],
+        "std_importance": std_importance,
+        "features": feat_labels,
     }
 
 
@@ -1160,6 +1205,19 @@ def plot_method_importance_heatmap(comparison: Dict[str, object], path_no_ext: s
                     fontsize=8, color="#111" if disp.values[i, j] < 0.6 else "white")
     fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02, label="importance (normalized)")
     _save(fig, path_no_ext)
+    # companion: std of normalized importance across models
+    if "std_importance" in comparison:
+        S = comparison["std_importance"].reindex(df.index)
+        fig, ax = plt.subplots(figsize=(1.4 * S.shape[1] + 2, 0.42 * S.shape[0] + 2))
+        im = ax.imshow(S.values, aspect="auto", cmap="Oranges", vmin=0)
+        ax.set_xticks(range(S.shape[1])); ax.set_xticklabels(S.columns, rotation=0, ha="center")
+        ax.set_yticks(range(S.shape[0])); ax.set_yticklabels(S.index)
+        ax.set_title(f"Importance std across models - {ds} ({comparison['bins']} bins)")
+        for i in range(S.shape[0]):
+            for j in range(S.shape[1]):
+                ax.text(j, i, f"{S.values[i, j]:.3f}", ha="center", va="center", fontsize=8, color="#111")
+        fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02, label="std of importance")
+        _save(fig, f"{path_no_ext}_variance")
 
 
 def plot_rank_correlation_heatmap(comparison: Dict[str, object], path_no_ext: str) -> None:
@@ -1180,6 +1238,19 @@ def plot_rank_correlation_heatmap(comparison: Dict[str, object], path_no_ext: st
     ax.set_title(f"Rank correlation - {ds}")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=r"Spearman $\rho$")
     _save(fig, path_no_ext)
+    # companion: std of Spearman correlation across models
+    if "std_corr_spearman" in comparison:
+        S = comparison["std_corr_spearman"]
+        fig, ax = plt.subplots(figsize=(0.9 * len(S) + 2, 0.9 * len(S) + 1.5))
+        im = ax.imshow(S.values, cmap="Oranges", vmin=0)
+        ax.set_xticks(range(len(S))); ax.set_xticklabels(S.columns, rotation=30, ha="right")
+        ax.set_yticks(range(len(S))); ax.set_yticklabels(S.index, rotation=0, ha="right")
+        for i in range(len(S)):
+            for j in range(len(S)):
+                ax.text(j, i, f"{S.values[i, j]:.3f}", ha="center", va="center", fontsize=8, color="#111")
+        ax.set_title(f"Rank correlation std - {ds}")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=r"std of Spearman $\rho$")
+        _save(fig, f"{path_no_ext}_variance")
 
 
 def plot_rank_biased_overlap_heatmap(comparison: Dict[str, object], path_no_ext: str) -> None:
@@ -1200,6 +1271,19 @@ def plot_rank_biased_overlap_heatmap(comparison: Dict[str, object], path_no_ext:
     ax.set_title(f"Rank-Biased Overlap - {ds}")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="RBO")
     _save(fig, path_no_ext)
+    # companion: std of RBO across models
+    if "std_rbo" in comparison:
+        S = comparison["std_rbo"]
+        fig, ax = plt.subplots(figsize=(0.9 * len(S) + 2, 0.9 * len(S) + 1.5))
+        im = ax.imshow(S.values, cmap="Oranges", vmin=0)
+        ax.set_xticks(range(len(S))); ax.set_xticklabels(S.columns, rotation=30, ha="right")
+        ax.set_yticks(range(len(S))); ax.set_yticklabels(S.index, rotation=0, ha="right")
+        for i in range(len(S)):
+            for j in range(len(S)):
+                ax.text(j, i, f"{S.values[i, j]:.3f}", ha="center", va="center", fontsize=8, color="#111")
+        ax.set_title(f"Rank-Biased Overlap std - {ds}")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="std of RBO")
+        _save(fig, f"{path_no_ext}_variance")
 
 
 def plot_topk_intersection(comparison: Dict[str, object], path_no_ext: str) -> None:
@@ -1218,6 +1302,17 @@ def plot_topk_intersection(comparison: Dict[str, object], path_no_ext: str) -> N
     ax.set_title(f"Top-k overlap with usefulness - {ds}")
     ax.legend(title="", ncol=len(ks))
     _save(fig, path_no_ext)
+    # companion: std of top-k overlap across models
+    if "std_topk" in comparison:
+        std_df = comparison["std_topk"].drop(index=["usefulness"], errors="ignore")
+        fig, ax = plt.subplots(figsize=(1.3 * len(methods) + 2, 4.5))
+        for i, k in enumerate(ks):
+            ax.bar(x + i * w - 0.4 + w / 2, std_df[k].values, width=w, label=k, color=COLOR_SCHEME[i])
+        ax.set_xticks(x); ax.set_xticklabels(methods, rotation=0, ha="center")
+        ax.set_ylabel("std of # shared features (top-k)")
+        ax.set_title(f"Top-k overlap std across models - {ds}")
+        ax.legend(title="", ncol=len(ks))
+        _save(fig, f"{path_no_ext}_variance")
 
 
 def plot_scaling(scaling_df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
@@ -1235,6 +1330,15 @@ def plot_scaling(scaling_df: pd.DataFrame, dataset: str, path_no_ext: str) -> No
     fig.suptitle(f"Usefulness-score scaling - {PRETTY_NAMES.get(dataset, dataset)}", fontweight="bold")
     fig.tight_layout()
     _save(fig, path_no_ext)
+    # companion: timing variance (CV = std/mean) per bin count
+    if "time_std_s" in df.columns:
+        cv = df["time_std_s"] / df["time_total_s"]
+        fig, ax = plt.subplots(figsize=(7, 4.0))
+        ax.bar(df["bins"].astype(str), cv.values, color=COLOR_SCHEME[0], edgecolor="black", linewidth=0.6)
+        ax.set_xlabel("number of bins"); ax.set_ylabel("coeff. of variation (std / mean)")
+        ax.set_title(f"Timing variance across seeds - {PRETTY_NAMES.get(dataset, dataset)}")
+        fig.tight_layout()
+        _save(fig, f"{path_no_ext}_variance")
 
 
 def plot_method_scaling(df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
@@ -1431,6 +1535,24 @@ def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, pat
         ax.legend(title="strategy")
         fig.tight_layout()
         _save(fig, f"{path_no_ext}_{fname}")
+
+    # companion: per-feature importance std across models (mean std per strategy, averaged over bins)
+    if "std" in binning.get("importance", pd.DataFrame()).columns:
+        imp = binning["importance"]
+        mean_std = imp.groupby(["strategy", "feature"])["std"].mean().reset_index()
+        features_order = imp["feature"].unique()
+        x = np.arange(len(features_order))
+        w = 0.8 / len(strategies)
+        fig, ax = plt.subplots(figsize=(max(6, 0.5 * len(features_order) + 2), 4.5))
+        for i, s in enumerate(strategies):
+            vals = mean_std[mean_std["strategy"] == s].set_index("feature").reindex(features_order)["std"].values
+            ax.bar(x + i * w - 0.4 + w / 2, vals, width=w, label=s, color=COLOR_SCHEME[i])
+        ax.set_xticks(x); ax.set_xticklabels(features_order, rotation=30, ha="right", fontsize=8)
+        ax.set_ylabel("mean std of importance across models")
+        ax.set_title(f"Importance variance by strategy - {PRETTY_NAMES.get(dataset, dataset)}")
+        ax.legend(title="strategy")
+        fig.tight_layout()
+        _save(fig, f"{path_no_ext}_importance_variance")
 
 
 def plot_scores(scores: Dict[str, object], dataset: str, path_no_ext: str) -> None:
