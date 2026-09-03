@@ -23,7 +23,14 @@ interactive read, or run the driver below for a headless one-shot.
 `run_score_experiment()` trains `n_models` trees per bin count, aggregates each
 feature's usefulness score into Q1/median/Q3 and the mean accuracy, and
 `plot_scores()` draws the exact Fig. 4/5 layout. This is the originalexperiment
-of the paper.
+of the paper. Because this figure is noisier than the rest (each box already
+pools 3 tree sizes, so a handful of reps swings the quartiles a lot), the
+driver runs it at its own, higher rep count — `--scores-n-models` (default
+200) — independent of `--n-models`. `plot_scores_grid()` additionally
+combines the per-bin-count panels (3, 4, 5, 6, 8) into one figure,
+`{dataset}_usefulness_scores_grid.png`: 3 same-sized panels on the first row,
+the remaining 2 centered on the second, under one title
+"Usefulness score - {Dataset}".
 
 ### (A) Compare the usefulness score with other importance methods
 `run_comparison_experiment()` computes, on the **same** trees, the usefulness
@@ -43,9 +50,16 @@ most important features counts for more than agreeing further down the list).
 `scaling_experiment()` measures how the usefulness algorithm **scales with #bins**
 (wall-clock via `time.perf_counter`). `method_runtime_comparison()` measures the
 **cost of every method** on the same model. `method_scaling_experiment()` compares
-**every method's runtime as tree size grows** (one line per method, log-log, with
-a fitted power law for usefulness), each point repeated 10x so the measurement
-noise is shown as a mean ± std band and a coefficient-of-variation bar chart.
+**every method's runtime as tree size grows** (one line per method, with a fitted
+power law for usefulness), each point repeated 10x so the measurement noise is
+shown as a mean ± std band — genuinely measured for every method, SHAP included;
+its band is just visually thin because SHAP's run-to-run timing noise is small
+in absolute terms. `plot_method_scaling()` renders this two ways — log-log
+(`_runtime.png`) and linear (`_runtime_linear.png`, tree sizes below 5% of the
+largest dropped so the log-spaced size grid doesn't crowd the small end) — plus
+a coefficient-of-variation bar chart (`_variance.png`). The linear view is the
+one that shows usefulness's actual crossover with the other methods at large
+tree sizes, which the log-log view flattens into parallel-looking lines.
 
 ### (C) Binning-strategy sensitivity
 `run_binning_experiment()` re-runs the usefulness experiment under

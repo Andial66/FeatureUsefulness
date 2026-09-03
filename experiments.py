@@ -828,6 +828,17 @@ def method_scaling_experiment(dataset: str, cfg: Config, strategy: str = "unifor
     tree-size sweep used to be).  Each (method, tree size) pair is timed
     ``repeat`` times, so the run-to-run measurement noise (mean +/- std) is
     visible, rather than a single best-of estimate.
+
+    On smaller datasets the tree can run out of room to grow well before the
+    top of that leaf-budget grid: once every leaf is pure (or the (dataset,
+    bins) combination just doesn't have that many distinguishable rows),
+    ``max_leaf_nodes`` becomes an unreachable ceiling and ``n_nodes`` plateaus
+    even as ``leaves`` keeps climbing -- e.g. California Housing (few rows,
+    coarse bins) saturates around 377 nodes while the grid keeps requesting up
+    to 6400 leaves.  Since ``n_nodes`` is what every plot is indexed by, those
+    extra points would all land on top of each other at the same x. The sweep
+    stops as soon as it detects that plateau (``n_nodes`` failing to grow
+    versus the previous point) rather than wasting time re-timing duplicates.
     """
     seed = cfg.seed if seed is None else seed
     bins = cfg.bins_grid[len(cfg.bins_grid) // 2] if bins is None else bins
@@ -836,9 +847,13 @@ def method_scaling_experiment(dataset: str, cfg: Config, strategy: str = "unifor
 
     rows = []
     warmed_up = set()
+    last_n_nodes = None
     for leaves in leaves_list:
         b = train_tree(dataset, bins=bins, strategy=strategy, seed=seed, leaves=leaves)
         n_nodes = int(b.clf.tree_.node_count)
+        if last_n_nodes is not None and n_nodes <= last_n_nodes:
+            break                                          # tree has saturated: stop the sweep
+        last_n_nodes = n_nodes
         for m in methods:
             if m not in warmed_up:                      # untimed warm-up (e.g. SHAP numba JIT)
                 try:
@@ -1341,42 +1356,79 @@ def plot_scaling(scaling_df: pd.DataFrame, dataset: str, path_no_ext: str) -> No
         _save(fig, f"{path_no_ext}_variance")
 
 
-def plot_method_scaling(df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
-    """Runtime vs tree size for every method in ``df`` (log-log, mean line + std
-    band), plus a companion bar chart of each method's timing variance
-    (coefficient of variation, averaged across tree sizes).
+def _draw_method_scaling_panel(ax: "plt.Axes", df: pd.DataFrame, methods_present: List[str],
+                               dataset: str, log_scale: bool, min_n_nodes: float = 0.0) -> None:
+    """Draw one runtime-vs-tree-size panel (mean line + std band per method,
+    plus a power-law fit for ``usefulness``) onto ``ax``. Shared by the log-log
+    and linear variants of :func:`plot_method_scaling`.
 
-    Saved as two separate images -- ``{path_no_ext}_runtime.png`` and
-    ``{path_no_ext}_variance.png`` -- so either can be dropped into a paper on
-    its own.  Pass a pre-filtered ``df`` (e.g. only the "usefulness"/"shap"
-    rows) for a focused head-to-head of just those methods.
+    The power-law fit is always estimated from *every* point (fitting a line
+    in log-log space needs the full size range for a stable slope) but only
+    drawn across the range actually visible on ``ax``, i.e. after
+    ``min_n_nodes`` has dropped the smallest tree sizes.
     """
-    methods_present = list(df["method"].unique())
-
-    # time vs tree size, one line + std band per method
-    fig, ax = plt.subplots(figsize=(8, 5))
     for m in methods_present:
-        d = df[df["method"] == m].sort_values("n_nodes")
+        d_full = df[df["method"] == m].sort_values("n_nodes")
+        d = d_full[d_full["n_nodes"] >= min_n_nodes]
+        if d.empty:
+            continue
         color = METHOD_COLORS.get(m, COLOR_SCHEME[7])
         ax.plot(d["n_nodes"], d["time_mean_s"], "o-", color=color, label=m)
-        lo = np.clip(d["time_mean_s"] - d["time_std_s"], 1e-6, None)
+        lo = np.clip(d["time_mean_s"] - d["time_std_s"], 1e-6 if log_scale else 0.0, None)
         hi = d["time_mean_s"] + d["time_std_s"]
         ax.fill_between(d["n_nodes"], lo, hi, color=color, alpha=0.15, linewidth=0)
     if "usefulness" in methods_present:                # power-law fit, as a complexity check
-        d = df[df["method"] == "usefulness"].sort_values("n_nodes")
-        x, y = d["n_nodes"].to_numpy(float), d["time_mean_s"].to_numpy(float)
-        if len(x) >= 2 and (x > 0).all() and (y > 0).all():
-            slope, intercept = np.polyfit(np.log(x), np.log(y), 1)
-            xs = np.array([x.min(), x.max()])
+        d_full = df[df["method"] == "usefulness"].sort_values("n_nodes")
+        x_full = d_full["n_nodes"].to_numpy(float)
+        y_full = d_full["time_mean_s"].to_numpy(float)
+        x_vis = x_full[x_full >= min_n_nodes]
+        if len(x_full) >= 2 and (x_full > 0).all() and (y_full > 0).all() and len(x_vis):
+            slope, intercept = np.polyfit(np.log(x_full), np.log(y_full), 1)
+            xs = np.array([x_vis.min(), x_vis.max()]) if log_scale else np.linspace(x_vis.min(), x_vis.max(), 100)
             ax.plot(xs, np.exp(intercept) * xs ** slope, "--",
                     color=METHOD_COLORS.get("usefulness", "black"), linewidth=1,
                     label=fr"usefulness fit $\propto |T|^{{{slope:.2f}}}$")
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("number of tree nodes"); ax.set_ylabel("time, all features (s)")
-    ax.set_title(f"Runtime vs tree size, per method - {PRETTY_NAMES.get(dataset, dataset)}")
+    if log_scale:
+        ax.set_xscale("log"); ax.set_yscale("log")
+    else:
+        ax.set_ylim(bottom=0)
+    ax.set_xlabel("Number of nodes"); ax.set_ylabel("Time (s)")
+    ax.set_title(f"Runtime vs tree size - {PRETTY_NAMES.get(dataset, dataset)}")
     ax.legend(fontsize=9)
+
+
+def plot_method_scaling(df: pd.DataFrame, dataset: str, path_no_ext: str) -> None:
+    """Runtime vs tree size for every method in ``df``: a log-log view (mean
+    line + std band per method) plus a linear-scale companion that makes the
+    *true* (non-log-compressed) growth visible -- e.g. that ``usefulness``
+    starts far below the other methods but overtakes them at large tree
+    sizes, a crossover that log-log axes flatten into parallel-looking lines.
+    A bar chart of each method's timing variance (coefficient of variation)
+    is included too.
+
+    The linear panel drops tree sizes below 5% of the largest one: the size
+    grid is log-spaced, so on a linear x-axis most of the small-tree points
+    would otherwise crowd into a sliver near the origin with barely any
+    horizontal separation between them.
+
+    Saved as three separate images -- ``{path_no_ext}_runtime.png``,
+    ``{path_no_ext}_runtime_linear.png`` and ``{path_no_ext}_variance.png`` --
+    so any one of them can be dropped into a paper on its own.  Pass a
+    pre-filtered ``df`` (e.g. only the "usefulness"/"shap" rows) for a focused
+    head-to-head of just those methods.
+    """
+    methods_present = list(df["method"].unique())
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    _draw_method_scaling_panel(ax, df, methods_present, dataset, log_scale=True)
     fig.tight_layout()
     _save(fig, f"{path_no_ext}_runtime")
+
+    min_n_nodes = 0.05 * df["n_nodes"].max()
+    fig, ax = plt.subplots(figsize=(8, 5))
+    _draw_method_scaling_panel(ax, df, methods_present, dataset, log_scale=False, min_n_nodes=min_n_nodes)
+    fig.tight_layout()
+    _save(fig, f"{path_no_ext}_runtime_linear")
 
     # timing variance per method (coefficient of variation, averaged over sizes)
     fig, ax = plt.subplots(figsize=(1.6 * len(methods_present) + 2, 4.5))
@@ -1555,29 +1607,82 @@ def plot_binning_sensitivity(binning: Dict[str, pd.DataFrame], dataset: str, pat
         _save(fig, f"{path_no_ext}_importance_variance")
 
 
+def _draw_score_panel(ax: "plt.Axes", d: Dict[str, object], bins: int, color: str,
+                      title: Optional[str] = None) -> None:
+    """Draw one bin-count's usefulness-score panel (median bars + Q1-Q3 whiskers
+    + mean-accuracy caption) onto ``ax``. Shared by :func:`plot_scores` (one
+    figure per bin count) and :func:`plot_scores_grid` (all bin counts as
+    same-sized panels in one figure).
+
+    The whisker is drawn at [Q1, Q3] around the bar tip (the median); it need
+    not be centered on the median for a skewed score distribution across reps
+    -- that asymmetry is expected, not a bug, and shrinks as reps increase.
+    """
+    y = np.arange(len(d["labels"]))
+    ax.barh(y, d["median"], color=color, alpha=0.4, edgecolor="black", height=0.6)
+    for yi, q1, q3 in zip(y, d["q1"], d["q3"]):              # Q1-Q3 whisker with end ticks
+        ax.plot([q1, q3], [yi, yi], color="black", lw=1.5)
+        ax.plot([q1, q1], [yi - 0.12, yi + 0.12], color="black", lw=1)
+        ax.plot([q3, q3], [yi - 0.12, yi + 0.12], color="black", lw=1)
+    ax.set_yticks(y); ax.set_yticklabels(d["labels"])
+    ax.set_xlabel("Score"); ax.set_title(title if title is not None else f"{bins} bins")
+    ax.ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
+    ax.text(0.5, -0.12, f"Avg Acc = {d['mean_accuracy']:.3f}", transform=ax.transAxes,
+            ha="center", va="top", bbox=dict(facecolor="white", edgecolor="black"))
+
+
+def _score_color(dataset: str) -> str:
+    return {"california": COLOR_SCHEME[5], "adult_income": COLOR_SCHEME[1],
+            "bike_sharing": COLOR_SCHEME[3]}.get(dataset, COLOR_SCHEME[0])
+
+
 def plot_scores(scores: Dict[str, object], dataset: str, path_no_ext: str) -> None:
     """Reproduce the paper's usefulness-score figure (Fig. 4 / 5): one image per
     bin count (``{path_no_ext}_{bins}bins.png``), horizontal bars at the median
     with Q1–Q3 whiskers and mean accuracy."""
     per_bins = scores["per_bins"]
     bins_list = sorted(per_bins)
-    color = {"california": COLOR_SCHEME[5], "adult_income": COLOR_SCHEME[1],
-             "bike_sharing": COLOR_SCHEME[3]}.get(dataset, COLOR_SCHEME[0])
+    color = _score_color(dataset)
 
     for bins in bins_list:
-        d = per_bins[bins]
         fig, ax = plt.subplots(figsize=(5, 6))
-        y = np.arange(len(d["labels"]))
-        ax.barh(y, d["median"], color=color, alpha=0.4, edgecolor="black", height=0.6)
-        for yi, q1, q3 in zip(y, d["q1"], d["q3"]):          # Q1–Q3 whisker with end ticks
-            ax.plot([q1, q3], [yi, yi], color="black", lw=1.5)
-            ax.plot([q1, q1], [yi - 0.12, yi + 0.12], color="black", lw=1)
-            ax.plot([q3, q3], [yi - 0.12, yi + 0.12], color="black", lw=1)
-        ax.set_yticks(y); ax.set_yticklabels(d["labels"])
-        ax.set_xlabel("Score"); ax.set_title(f"{bins} bins")
-        ax.ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
-        ax.text(0.5, -0.12, f"Avg Acc = {d['mean_accuracy']:.3f}", transform=ax.transAxes,
-                ha="center", va="top", bbox=dict(facecolor="white", edgecolor="black"))
+        _draw_score_panel(ax, per_bins[bins], bins, color)
         fig.suptitle(f"Usefulness score - {PRETTY_NAMES.get(dataset, dataset)}", fontweight="bold", y=1.04)
         fig.tight_layout()
         _save(fig, f"{path_no_ext}_{bins}bins")
+
+
+def plot_scores_grid(scores: Dict[str, object], dataset: str, path_no_ext: str) -> None:
+    """All bin-count panels from :func:`plot_scores` combined into one figure:
+    3 panels on the first row (the three lowest bin counts), the rest centered
+    on the second row, every panel the same size, one shared title
+    ``"Usefulness score - {Dataset}"``. Written to ``{path_no_ext}.png``.
+
+    Falls back gracefully to any bin-count grid whose panels split 3-then-rest
+    across two rows (the paper's default is 3, 4, 5, 6, 8 -> 3 top + 2 bottom).
+    """
+    per_bins = scores["per_bins"]
+    bins_list = sorted(per_bins)
+    color = _score_color(dataset)
+
+    n_top = min(3, len(bins_list))
+    top_bins, bottom_bins = bins_list[:n_top], bins_list[n_top:]
+    n_bottom = len(bottom_bins)
+    ncols = max(2 * n_top, 1)                    # 2 grid columns per panel -> easy centering
+
+    fig = plt.figure(figsize=(5 * n_top, 12))
+    gs = fig.add_gridspec(2, ncols)
+    for row_bins in (top_bins, bottom_bins):
+        n = len(row_bins)
+        if n == 0:
+            continue
+        offset = (ncols - 2 * n) // 2             # centers a short row within the grid
+        row = 0 if row_bins is top_bins else 1
+        for i, bins in enumerate(row_bins):
+            ax = fig.add_subplot(gs[row, offset + 2 * i: offset + 2 * i + 2])
+            _draw_score_panel(ax, per_bins[bins], bins, color, title=f"{bins} bins")
+
+    fig.suptitle(f"Usefulness score - {PRETTY_NAMES.get(dataset, dataset)}",
+                 fontweight="bold", fontsize=24, y=1.02)
+    fig.tight_layout()
+    _save(fig, path_no_ext)

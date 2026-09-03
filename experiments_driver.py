@@ -53,6 +53,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="which experiment families to run ('scores' reproduces the paper's "
                         "original feature usefulness qualitative analysis)")
     p.add_argument("--n-models", type=int, default=20, help="trees per configuration (paper: 20)")
+    p.add_argument("--scores-n-models", type=int, default=200,
+                   help="reps per bin count for the main usefulness-scores figures (default: 200)")
     p.add_argument("--bins", type=int, default=6, help="#bins for the comparison experiment")
     p.add_argument("--seed", type=int, default=42, help="master random seed")
     p.add_argument("--sample", type=int, default=200, help="rows for sampling-based methods")
@@ -82,8 +84,9 @@ def main(argv=None) -> None:
     methods = method_list(args)
 
     # A run manifest makes every figure traceable back to its exact settings.
-    manifest = {"seed": args.seed, "n_models": args.n_models, "bins": args.bins,
-                "methods": methods, "datasets": args.datasets, "experiments": args.experiments}
+    manifest = {"seed": args.seed, "n_models": args.n_models, "scores_n_models": args.scores_n_models,
+                "bins": args.bins, "methods": methods, "datasets": args.datasets,
+                "experiments": args.experiments}
     with open(os.path.join(args.out, "run_manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)
     print("Run manifest:", json.dumps(manifest))
@@ -96,10 +99,11 @@ def main(argv=None) -> None:
 
         # ---- paper's main experiment: usefulness scores ------
         if "scores" in args.experiments:
-            print("[main] usefulness scores ...")
-            scores = ux.run_score_experiment(ds, cfg, strategy="uniform")
+            print(f"[main] usefulness scores ({args.scores_n_models} reps/bin count) ...")
+            scores = ux.run_score_experiment(ds, cfg, strategy="uniform", n_models=args.scores_n_models)
             scores["table"].to_csv(f"{tag}_usefulness_scores.csv", index=False)
             ux.plot_scores(scores, ds, f"{tag}_usefulness_scores")
+            ux.plot_scores_grid(scores, ds, f"{tag}_usefulness_scores_grid")
             print("    top feature by median score, per bin count:")
             for bins, d in scores["per_bins"].items():
                 print(f"      {bins} bins: {d['labels'][-1]:20s} (mean acc {d['mean_accuracy']:.3f})")
