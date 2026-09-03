@@ -1,0 +1,16 @@
+dataset,strategy,bins,accuracy
+bike_sharing,uniform,3,0.8400690448791716
+bike_sharing,uniform,4,0.8455638665132338
+bike_sharing,uniform,5,0.8405926352128883
+bike_sharing,uniform,6,0.8508688147295739
+bike_sharing,uniform,8,0.8624165707710012
+bike_sharing,quantile,3,0.8417836593785962
+bike_sharing,quantile,4,0.8488089758342923
+bike_sharing,quantile,5,0.8333774453394709
+bike_sharing,quantile,6,0.8522209436133485
+bike_sharing,quantile,8,0.8603970080552358
+bike_sharing,kmeans,3,0.8438319907940158
+bike_sharing,kmeans,4,0.8466455696202533
+bike_sharing,kmeans,5,0.8406674338319908
+bike_sharing,kmeans,6,0.8535558112773302
+bike_sharing,kmeans,8,0.8625891829689302
